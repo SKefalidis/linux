@@ -4569,6 +4569,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 		left = curr;
 
 	se = left; /* ideally we run the leftmost entity */
+	BUG_ON(!se);
 
 	/*
 	 * Avoid running the skip buddy, if running something else can
@@ -7270,11 +7271,13 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p;
 	int new_tasks;
 
-again:
-	if (!sched_fair_runnable(rq))
-		goto idle;
+	BUG();
 
+//again:
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	if (!cfs_rq->nr_running)
+		return NULL;
+
 	if (!prev || prev->sched_class != &fair_sched_class)
 		goto simple;
 
@@ -7352,6 +7355,9 @@ again:
 	goto done;
 simple:
 #endif
+	if (!cfs_rq->nr_running)
+		return NULL;
+
 	if (prev)
 		put_prev_task(rq, prev);
 
@@ -7390,7 +7396,6 @@ idle:
 	 * Because newidle_balance() releases (and re-acquires) rq->lock, it is
 	 * possible for any higher priority task to appear. In that case we
 	 * must re-start the pick_next_entity() loop.
-	 */
 	if (new_tasks < 0)
 		return RETRY_TASK;
 
@@ -9907,6 +9912,8 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.fbq_type	= all,
 		.tasks		= LIST_HEAD_INIT(env.tasks),
 	};
+	
+	BUG();
 
 	cpumask_and(cpus, sched_domain_span(sd), cpu_active_mask);
 
@@ -11787,7 +11794,6 @@ static unsigned int get_rr_interval_fair(struct rq *rq, struct task_struct *task
  * All the scheduling class methods:
  */
 DEFINE_SCHED_CLASS(fair) = {
-
 	.enqueue_task		= enqueue_task_fair,
 	.dequeue_task		= dequeue_task_fair,
 	.yield_task		= yield_task_fair,

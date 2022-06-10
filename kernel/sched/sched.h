@@ -87,6 +87,9 @@
 # include <asm/paravirt_api_clock.h>
 #endif
 
+#include <linux/slab.h>
+#include <linux/sched/runq.h>
+
 #include "cpupri.h"
 #include "cpudeadline.h"
 
@@ -749,6 +752,30 @@ static inline long se_runnable(struct sched_entity *se)
 }
 #endif
 
+struct ktz_tdq {
+	/* legacy */
+	struct list_head queue;
+	//struct mtx_padalign lock;		/* run queue lock. */
+	//struct cpu_group *cg;		/* Pointer to cpu topology. */
+	volatile int	load;		/* Aggregate load. */
+	volatile int	cpu_idle;		/* cpu_idle() is active. */
+	int		sysload;		/* For loadavg, !ITHD load. */
+	int		transferable;	/* Transferable thread count. */
+	short		switchcnt;		/* Switches this tick. */
+	short		oldswitchcnt;	/* Switches last tick. */
+	u_char		lowpri;		/* Lowest priority thread. */
+	u_char		ipipending;		/* IPI pending. */
+	int		idx;		/* Current insert index. */
+	int		ridx;		/* Current removal index. */
+	struct runq	realtime;		/* real-time run queue. */
+	struct runq	timeshare;		/* timeshare run queue. */
+	struct runq	idle;		/* Queue of IDLE threads. */
+	//char		name[TDQ_NAME_LEN];
+#ifdef KTR
+	//char		loadname[TDQ_LOADNAME_LEN];
+#endif
+};
+
 #ifdef CONFIG_SMP
 /*
  * XXX we want to get rid of these helpers and use the full load resolution.
@@ -947,6 +974,7 @@ struct rq {
 	struct cfs_rq		cfs;
 	struct rt_rq		rt;
 	struct dl_rq		dl;
+	struct ktz_tdq 		ktz;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this CPU: */
@@ -2207,6 +2235,7 @@ extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
+extern const struct sched_class ktz_sched_class;
 
 static inline bool sched_stop_runnable(struct rq *rq)
 {
@@ -2691,6 +2720,7 @@ static inline void resched_latency_warn(int cpu, u64 latency) {}
 extern void init_cfs_rq(struct cfs_rq *cfs_rq);
 extern void init_rt_rq(struct rt_rq *rt_rq);
 extern void init_dl_rq(struct dl_rq *dl_rq);
+extern void init_ktz_tdq(struct ktz_tdq *ktz_tdq);
 
 extern void cfs_bandwidth_usage_inc(void);
 extern void cfs_bandwidth_usage_dec(void);

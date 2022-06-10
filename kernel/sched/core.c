@@ -4497,10 +4497,14 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		return -EAGAIN;
 	else if (rt_prio(p->prio))
 		p->sched_class = &rt_sched_class;
-	else
-		p->sched_class = &fair_sched_class;
+	else {
+		if (ktz_prio(p->prio)) 
+			p->sched_class = &ktz_sched_class;
+		else
+			p->sched_class = &fair_sched_class;
+	}
 
-	init_entity_runnable_average(&p->se);
+	init_entity_runnable_average(&(p->se));
 
 
 #ifdef CONFIG_SCHED_INFO
@@ -5356,7 +5360,7 @@ void scheduler_tick(void)
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
-	trigger_load_balance(rq);
+	//trigger_load_balance(rq);
 #endif
 }
 
@@ -6715,6 +6719,8 @@ static void __setscheduler_prio(struct task_struct *p, int prio)
 		p->sched_class = &dl_sched_class;
 	else if (rt_prio(prio))
 		p->sched_class = &rt_sched_class;
+	else if (ktz_prio(prio))
+		p->sched_class = &ktz_sched_class;
 	else
 		p->sched_class = &fair_sched_class;
 
@@ -6879,6 +6885,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	int old_prio;
 	struct rq_flags rf;
 	struct rq *rq;
+	const struct sched_class *prev_class;
 
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
 		return;
@@ -9546,6 +9553,7 @@ void __init sched_init(void)
 		init_cfs_rq(&rq->cfs);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
+		init_ktz_tdq(&rq->ktz);
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
