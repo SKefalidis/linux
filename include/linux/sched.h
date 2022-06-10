@@ -35,6 +35,7 @@
 #include <linux/seqlock.h>
 #include <linux/kcsan.h>
 #include <asm/kmap_size.h>
+#include <linux/sched/sysctl.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -695,6 +696,33 @@ struct uclamp_se {
 };
 #endif /* CONFIG_UCLAMP_TASK */
 
+struct sched_ktz_entity {
+	/* legacy */
+	struct list_head run_list;
+	struct runq 	*curr_runq;	/* Current runq. */
+	struct list_head runq;	/* node in runq. */
+	short		flags;	/* TSF_* flags. */
+	int		cpu;	/* CPU that we have affinity for. NU */
+	int		rltick;	/* Real last tick, for affinity. NU */
+	int		slice;	/* Ticks of slice remaining. */
+	unsigned long long	slptime;	/* Number of ticks we vol. slept */
+	unsigned long long	slptick;/* First tick of current sleep */
+	unsigned long long	runtime;	/* Number of ticks we were running */
+	unsigned long long		ltick;	/* Last tick that we were running on */
+	unsigned long long		ftick;	/* First tick that we were running on */
+	unsigned long long		ticks;	/* Tick count */
+	int		rqindex;	/* Index of the runq in the tdq. */
+#ifdef KTR
+	//char		ts_name[TS_NAME_LEN];
+#endif
+	/* May not be useful. */
+	int		base_user_pri;
+	int		lend_user_pri;
+	int		user_pri;
+	int		state;
+	int		preempted; /* Is this task being preempted ? */
+};
+
 union rcu_special {
 	struct {
 		u8			blocked;
@@ -777,6 +805,8 @@ struct task_struct {
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;
+	struct sched_ktz_entity		ktz_se;
+	int				ktz_prio;
 	const struct sched_class	*sched_class;
 
 #ifdef CONFIG_SCHED_CORE
@@ -1453,6 +1483,7 @@ struct task_struct {
 	/* A live task holds one reference: */
 	refcount_t			stack_refcount;
 #endif
+
 #ifdef CONFIG_LIVEPATCH
 	int patch_state;
 #endif
@@ -1516,6 +1547,21 @@ struct task_struct {
 	 * Do not put anything below here!
 	 */
 };
+
+#define MIN_KTZ_PRIO 100
+#define MAX_KTZ_PRIO 139
+#define KTZ_PRIO_RANGE (MAX_KTZ_PRIO - MIN_KTZ_PRIO + 1)
+#define KTZ_PREEMPTED 0x1
+
+static inline int ktz_prio(int prio)
+{
+	return sysctl_ktz_enabled && MIN_KTZ_PRIO <= prio && prio <= MAX_KTZ_PRIO;
+}
+
+static inline int ktz_task(struct task_struct *p)
+{
+	return ktz_prio(p->prio);
+}
 
 static inline struct pid *task_pid(struct task_struct *task)
 {
