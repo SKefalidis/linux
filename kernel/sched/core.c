@@ -4498,10 +4498,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	else if (rt_prio(p->prio))
 		p->sched_class = &rt_sched_class;
 	else {
-		if (ktz_prio(p->prio)) 
-			p->sched_class = &ktz_sched_class;
-		else
-			p->sched_class = &fair_sched_class;
+		p->sched_class = &ktz_sched_class;
 	}
 
 	init_entity_runnable_average(&(p->se));
@@ -5714,6 +5711,8 @@ restart:
 
 	for_each_class(class) {
 		p = class->pick_next_task(rq);
+		if (class == &fair_sched_class && p)
+			BUG();
 		if (p)
 			return p;
 	}
@@ -6719,10 +6718,8 @@ static void __setscheduler_prio(struct task_struct *p, int prio)
 		p->sched_class = &dl_sched_class;
 	else if (rt_prio(prio))
 		p->sched_class = &rt_sched_class;
-	else if (ktz_prio(prio))
-		p->sched_class = &ktz_sched_class;
 	else
-		p->sched_class = &fair_sched_class;
+		p->sched_class = &ktz_sched_class;
 
 	p->prio = prio;
 }
