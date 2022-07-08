@@ -7240,7 +7240,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p;
 	int new_tasks;
 
-	BUG();
+	// BUG();
 
 //again:
 #ifdef CONFIG_FAIR_GROUP_SCHED
