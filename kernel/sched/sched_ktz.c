@@ -1316,9 +1316,9 @@ redo:
 
 		/* Steal something. */
 		// lockdep_unpin_lock(&rq->__lock, cookie);
-		// raw_spin_unlock(&rq->__lock);
-		// steal = tdq_idled(tdq);
-		// raw_spin_lock(&rq->__lock);
+		raw_spin_unlock(&rq->__lock);
+		steal = tdq_idled(tdq);
+		raw_spin_lock(&rq->__lock);
 		// lockdep_repin_lock(&rq->__lock, cookie);
 
 		/* Either we managed to steal a task, or $BALANCING_CPU gave us
@@ -1556,6 +1556,7 @@ const struct sched_class ktz_sched_class = {
 	.enqueue_task		= enqueue_task_ktz,
 	.dequeue_task		= dequeue_task_ktz,
 	.yield_task			= yield_task_ktz,
+	.yield_to_task		= NULL,
 
 	.check_preempt_curr	= check_preempt_curr_ktz,
 	
@@ -1564,9 +1565,16 @@ const struct sched_class ktz_sched_class = {
 	.set_next_task      = set_next_task_ktz,
 
 #ifdef CONFIG_SMP
+	.balance			= NULL,
 	.select_task_rq		= select_task_rq_ktz,
+	.pick_task			= NULL,
 	.migrate_task_rq	= migrate_task_rq_ktz,
+	.task_woken			= NULL,
 	.set_cpus_allowed   = set_cpus_allowed_common,
+
+	.rq_online			= NULL,
+	.rq_offline			= NULL,
+	.find_lock_rq		= NULL,
 #endif
 
 	.task_tick			= task_tick_ktz,
