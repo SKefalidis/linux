@@ -14,6 +14,10 @@ extern unsigned long sysctl_hung_task_timeout_secs;
 enum { sysctl_hung_task_timeout_secs = 0 };
 #endif
 
+extern unsigned int sysctl_sched_child_runs_first;
+extern unsigned int sysctl_ktz_enabled;
+extern unsigned int sysctl_ktz_forced_timeslice;
+
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,
