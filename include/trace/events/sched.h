@@ -10,6 +10,82 @@
 #include <linux/tracepoint.h>
 #include <linux/binfmts.h>
 
+TRACE_EVENT(sched_interactivity,
+	TP_PROTO(struct task_struct *p, int interactivity, int score),
+
+	TP_ARGS(p, interactivity, score),
+
+	TP_STRUCT__entry(
+		__array(	char,	comm,	TASK_COMM_LEN	)
+		__field(        int,    interactivity                     )
+		__field(        int,    score                     )
+		__field(        int,    prio                     )
+		__field(        int,    pid                     )
+		),
+
+	TP_fast_assign(
+		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
+		__entry->interactivity            = interactivity;
+		__entry->score			= score;
+		__entry->prio            = p->ktz_prio;
+		__entry->pid            = p->pid;
+		),
+
+	TP_printk("comm=%s pid=%d interactivity=%d score=%d prio=%d", __entry->comm, __entry->pid, __entry->interactivity, __entry->score, __entry->prio)
+);
+
+TRACE_EVENT(sched_load_changed,
+	TP_PROTO(int cpu, int load),
+	TP_ARGS(cpu, load),
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(int, load)
+	),
+
+	TP_fast_assign(
+		__entry->cpu = cpu;
+		__entry->load = load;
+	),
+
+	TP_printk("cpu=%d load=%d", __entry->cpu, __entry->load)
+);
+
+TRACE_EVENT(sched_plb,
+	TP_PROTO(unsigned long long time),
+	TP_ARGS(time),
+	TP_STRUCT__entry(
+		__field(unsigned long long, time)
+	),
+
+	TP_fast_assign(
+		__entry->time = time;
+	),
+
+	TP_printk("time=%llu", __entry->time)
+);
+
+TRACE_EVENT(sched_strq,
+
+	TP_PROTO(struct task_struct *child, int idx),
+
+	TP_ARGS(child, idx),
+
+	TP_STRUCT__entry(
+		__array(	char,	child_comm,	TASK_COMM_LEN	)
+		__field(	pid_t,	child_pid			)
+		__field(	int,	idx				)
+	),
+
+	TP_fast_assign(
+		memcpy(__entry->child_comm, child->comm, TASK_COMM_LEN);
+		__entry->child_pid	= child->pid;
+		__entry->idx		= idx;
+	),
+
+	TP_printk("comm=%s pid=%d idx=%d",
+		__entry->child_comm, __entry->child_pid, __entry->idx)
+);
+
 /*
  * Tracepoint for calling kthread_stop, performed to end a kthread:
  */
@@ -380,6 +456,8 @@ TRACE_EVENT(sched_process_fork,
 		__field(	pid_t,	parent_pid			)
 		__array(	char,	child_comm,	TASK_COMM_LEN	)
 		__field(	pid_t,	child_pid			)
+		__field(	unsigned long*, cpus		)
+		__array(	char,	cpus_str,	32	)
 	),
 
 	TP_fast_assign(
@@ -387,11 +465,13 @@ TRACE_EVENT(sched_process_fork,
 		__entry->parent_pid	= parent->pid;
 		memcpy(__entry->child_comm, child->comm, TASK_COMM_LEN);
 		__entry->child_pid	= child->pid;
+		__entry->cpus = child->cpus_mask.bits;
+		snprintf(__entry->cpus_str, 32, "%*pbl", cpumask_pr_args(&(child->cpus_mask)));
 	),
 
-	TP_printk("comm=%s pid=%d child_comm=%s child_pid=%d",
+	TP_printk("comm=%s pid=%d child_comm=%s child_pid=%d child_cpus=%s",
 		__entry->parent_comm, __entry->parent_pid,
-		__entry->child_comm, __entry->child_pid)
+		__entry->child_comm, __entry->child_pid, __entry->cpus_str)
 );
 
 /*

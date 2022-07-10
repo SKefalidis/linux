@@ -4540,10 +4540,11 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		return -EAGAIN;
 	else if (rt_prio(p->prio))
 		p->sched_class = &rt_sched_class;
-	else
-		p->sched_class = &fair_sched_class;
+	else {
+		p->sched_class = &ktz_sched_class;
+	}
 
-	init_entity_runnable_average(&p->se);
+	init_entity_runnable_average(&(p->se));
 
 
 #ifdef CONFIG_SCHED_INFO
@@ -5429,7 +5430,7 @@ void scheduler_tick(void)
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
-	trigger_load_balance(rq);
+	//trigger_load_balance(rq);
 #endif
 }
 
@@ -5762,27 +5763,29 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * higher scheduling class, because otherwise those lose the
 	 * opportunity to pull in more work from other CPUs.
 	 */
-	if (likely(!sched_class_above(prev->sched_class, &fair_sched_class) &&
-		   rq->nr_running == rq->cfs.h_nr_running)) {
+	// if (likely(!sched_class_above(prev->sched_class, &fair_sched_class) &&
+	//	   rq->nr_running == rq->cfs.h_nr_running)) {
 
-		p = pick_next_task_fair(rq, prev, rf);
-		if (unlikely(p == RETRY_TASK))
-			goto restart;
+	// 	p = pick_next_task_fair(rq, prev, rf);
+	// 	if (unlikely(p == RETRY_TASK))
+	// 		goto restart;
 
-		/* Assume the next prioritized class is idle_sched_class */
-		if (!p) {
-			put_prev_task(rq, prev);
-			p = pick_next_task_idle(rq);
-		}
+	// 	/* Assume the next prioritized class is idle_sched_class */
+	// 	if (!p) {
+	// 		put_prev_task(rq, prev);
+	// 		p = pick_next_task_idle(rq);
+	// 	}
 
-		return p;
-	}
+	// 	return p;
+	// }
 
-restart:
+// restart:
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
 		p = class->pick_next_task(rq);
+		if (class == &fair_sched_class && p)
+			BUG();
 		if (p)
 			return p;
 	}
@@ -6786,7 +6789,7 @@ static void __setscheduler_prio(struct task_struct *p, int prio)
 	else if (rt_prio(prio))
 		p->sched_class = &rt_sched_class;
 	else
-		p->sched_class = &fair_sched_class;
+		p->sched_class = &ktz_sched_class;
 
 	p->prio = prio;
 }
@@ -6949,6 +6952,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	int old_prio;
 	struct rq_flags rf;
 	struct rq *rq;
+	// const struct sched_class *prev_class;
 
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
 		return;
@@ -9540,11 +9544,15 @@ void __init sched_init(void)
 
 	/* Make sure the linker didn't screw up */
 	BUG_ON(&idle_sched_class != &fair_sched_class + 1 ||
-	       &fair_sched_class != &rt_sched_class + 1 ||
+	       &fair_sched_class != &ktz_sched_class + 1 ||
+		   &ktz_sched_class  != &rt_sched_class + 1 ||
 	       &rt_sched_class   != &dl_sched_class + 1);
 #ifdef CONFIG_SMP
 	BUG_ON(&dl_sched_class != &stop_sched_class + 1);
 #endif
+
+	printk("KTZ ADDRESS: %px\n", &ktz_sched_class);
+	printk("CFS ADDRESS: %px\n", &fair_sched_class);
 
 	wait_bit_init();
 
@@ -9614,6 +9622,7 @@ void __init sched_init(void)
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
 		init_cfs_rq(&rq->cfs);
+		init_ktz_tdq(&rq->ktz);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
 #ifdef CONFIG_FAIR_GROUP_SCHED
