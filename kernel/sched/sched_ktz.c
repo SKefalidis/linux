@@ -88,6 +88,19 @@ static int 		steal_thresh 			= 2;
 #define PREEMPT_THRESH 		(80)
 #define PERIODIC_BALANCE	(1)
 
+/* HCS VARIABLES START */
+
+cpumask_t SMALL_CORE_GROUP_MASK;
+cpumask_t BIG_CORE_GROUP_MASK;
+
+const unsigned int SMALL_CORE_GROUP_LOAD_LIMIT = 80;
+const unsigned int BIG_CORE_GROUP_LOAD_LIMIT = 90;
+
+unsigned int hcs_score_threshold = SCHED_INTERACT_THRESH;
+unsigned int hsc_score_deviation = 5;
+
+/* HCS VARIABLES END */
+
 unsigned int sysctl_ktz_enabled 		 = 1; /* Enabled by default */
 unsigned int sysctl_ktz_forced_timeslice = 0; /* Force the value of a slice, 0 = default. */
 
@@ -216,30 +229,15 @@ struct cpu_search {
 	int	cs_load;
 };
 
-static int cpu_search(struct sched_domain *cg, struct cpu_search *low, struct cpu_search *high, const int match);
-
-inline int cpu_search_lowest(struct sched_domain *cg, struct cpu_search *low)
-{
-	return cpu_search(cg, low, NULL, CPU_SEARCH_LOWEST);
-}
-
-inline int cpu_search_highest(struct sched_domain *cg, struct cpu_search *high)
-{
-	return cpu_search(cg, NULL, high, CPU_SEARCH_HIGHEST);
-}
-
-inline int cpu_search_both(struct sched_domain *cg, struct cpu_search *low, struct cpu_search *high)
-{
-	return cpu_search(cg, low, high, CPU_SEARCH_BOTH);
-}
-
-int cpu_search(struct sched_domain *cg, struct cpu_search *low, struct cpu_search *high, const int match)
+static int cpu_search(cpumask_t *cpumask, struct cpu_search *low, struct cpu_search *high, const int match)
 {
 	struct cpu_search lgroup;
 	struct cpu_search hgroup;
-	struct cpumask cpumask;
+	struct cpumask cpumask_c;
 	struct ktz_tdq *tdq;
 	int cpu, hload, lload, load, total, rnd;
+
+	cpumask_copy(&cpumask_c, cpumask);
 
 	/* Avoid warnings. */
 	hgroup.cs_cpu = -1;
@@ -248,8 +246,7 @@ int cpu_search(struct sched_domain *cg, struct cpu_search *low, struct cpu_searc
 	hgroup.cs_load = INT_MIN;
 
 	total = 0;
-	BUG_ON(!cg);
-	cpumask_copy(&cpumask, sched_domain_span(cg));
+
 	if (match & CPU_SEARCH_LOWEST) {
 		lload = INT_MAX;
 		lgroup = *low;
@@ -260,13 +257,12 @@ int cpu_search(struct sched_domain *cg, struct cpu_search *low, struct cpu_searc
 	}
 
 	/* Iterate through the child CPU groups and then remaining CPUs. */
-	//for (i = cg->span_weight, cpu = nr_cpu_ids; ; ) {
-	for_each_cpu(cpu, &cpumask) {
+	for_each_cpu(cpu, &cpumask_c) {
 		if (match & CPU_SEARCH_LOWEST)
 			lgroup.cs_cpu = -1;
 		if (match & CPU_SEARCH_HIGHEST)
 			hgroup.cs_cpu = -1;
-		cpumask_clear_cpu(cpu, &cpumask);
+		cpumask_clear_cpu(cpu, &cpumask_c);
 		tdq = TDQ(cpu_rq(cpu));
 		load = tdq->load * 256;
 		rnd = sched_random() % 32;
@@ -311,6 +307,21 @@ int cpu_search(struct sched_domain *cg, struct cpu_search *low, struct cpu_searc
 	}
 	return (total);
 }
+
+inline int cpu_search_lowest(struct cpu_search *low)
+{
+	return cpu_search(low->cs_mask, low, NULL, CPU_SEARCH_LOWEST);
+}
+
+inline int cpu_search_highest(struct cpu_search *high)
+{
+	return cpu_search(high->cs_mask, NULL, high, CPU_SEARCH_HIGHEST);
+}
+
+// inline int cpu_search_both(struct sched_domain *cg, struct cpu_search *low, struct cpu_search *high)
+// {
+// 	return cpu_search(NULL, low, high, CPU_SEARCH_BOTH);
+// }
 #endif
 
 #define PRINT(name)	printk_deferred(#name "\t\t = %d", name)
@@ -345,6 +356,21 @@ void init_ktz_tdq(struct ktz_tdq *ktz_tdq)
 
 	if (smp_processor_id() == BALANCING_CPU)
 		balance_ticks = max(balance_interval / 2, 1) + (sched_random() % balance_interval);
+
+	/* HCS INIT */
+	cpumask_clear(&SMALL_CORE_GROUP_MASK);
+	cpumask_set_cpu(0, &SMALL_CORE_GROUP_MASK);
+	cpumask_set_cpu(1, &SMALL_CORE_GROUP_MASK);
+	cpumask_set_cpu(2, &SMALL_CORE_GROUP_MASK);
+	cpumask_set_cpu(3, &SMALL_CORE_GROUP_MASK);
+	printk("Small mask: %*pb\n", cpumask_pr_args(&SMALL_CORE_GROUP_MASK));
+
+	cpumask_clear(&BIG_CORE_GROUP_MASK);
+	cpumask_set_cpu(4, &BIG_CORE_GROUP_MASK);
+	cpumask_set_cpu(5, &BIG_CORE_GROUP_MASK);
+	cpumask_set_cpu(6, &BIG_CORE_GROUP_MASK);
+	cpumask_set_cpu(7, &BIG_CORE_GROUP_MASK);
+	printk("Big mask: %*pb\n", cpumask_pr_args(&BIG_CORE_GROUP_MASK));
 }
 
 #undef PRINT
@@ -445,7 +471,11 @@ static int interact_score(struct task_struct *p)
 	 * This can happen if slptime and runtime are 0.
 	 */
 	return (0);
+}
 
+static int hcs_score(struct task_struct *p)
+{
+	return interact_score(p);
 }
 
 /*
@@ -779,18 +809,19 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 	check_preempt_curr(rq, p, 0);
 }
 
-static inline int sched_highest(struct sched_domain *sd, struct cpumask *mask, int minload)
+static inline int sched_highest(struct cpumask *mask, int minload)
 {
 	struct cpu_search high;
 
 	high.cs_cpu = -1;
 	high.cs_mask = mask;
 	high.cs_limit = minload;
-	cpu_search_highest(sd, &high);
+	cpu_search_highest(&high);
+
 	return high.cs_cpu;
 }
 
-static inline int sched_lowest(struct sched_domain *sd, struct cpumask *mask, int pri, int maxload, int prefer)
+static inline int sched_lowest(struct cpumask *mask, int pri, int maxload, int prefer)
 {
 	struct cpu_search low;
 
@@ -799,7 +830,8 @@ static inline int sched_lowest(struct sched_domain *sd, struct cpumask *mask, in
 	low.cs_mask = mask;
 	low.cs_pri = pri;
 	low.cs_limit = maxload;
-	cpu_search_lowest(sd, &low);
+	cpu_search_lowest(&low);
+
 	return low.cs_cpu;
 }
 
@@ -933,19 +965,19 @@ static int sched_balance_pair(struct ktz_tdq *high, struct ktz_tdq *low)
 /*
  * Fixed version that can migrate multiple threads from the same cpu.
  */
-static int sched_balance_group_fixed(struct sched_domain *sd)
+static int sched_balance_group_fixed(struct sched_domain *sd, cpumask_t base_cpumask)
 {
 	struct cpumask hmask, lmask; 
 	int high, low, anylow, moved;
 	struct ktz_tdq *tdq_high;
 	struct ktz_tdq *tdq_low;
 
-	cpumask_setall(&hmask);
+	cpumask_copy(&hmask, &base_cpumask);
 	(void) cpumask_and(&hmask, &hmask, cpu_online_mask);
 	moved = 0;
 
 	for (;;) {
-		high = sched_highest(sd, &hmask, 1);
+		high = sched_highest(&hmask, 1);
 		/* Stop if there is no more CPU with transferrable threads. */
 		if (high == -1)
 			break;
@@ -962,7 +994,7 @@ nextlow:
 			cpumask_clear_cpu(high, &hmask);
 			continue;
 		}
-		low = sched_lowest(sd, &lmask, -1, tdq_high->load - 1, high);
+		low = sched_lowest(&lmask, -1, tdq_high->load - 1, high);
 		BUG_ON(low == high);
 		/* Stop if we looked well and found no less loaded CPU. */
 		if (anylow && low == -1)
@@ -1007,8 +1039,10 @@ static int sched_balance(struct rq *rq)
 	trace_plb();
 
 	raw_spin_unlock(&rq->__lock);
-	moved = sched_balance_group_fixed(top);
+	sched_hcs_balance_groups(top);
+	moved = sched_balance_group_fixed(top, BIG_CORE_GROUP_MASK) + sched_balance_group_fixed(top, SMALL_CORE_GROUP_MASK);
 	raw_spin_lock(&rq->__lock);
+
 	return moved;
 }
 
@@ -1033,6 +1067,7 @@ static int tdq_idled(struct ktz_tdq *this_tdq)
 
 	cpumask_setall(&cpus);
 	/* Don't steal from oursleves. */
+	/* TODO: Should we only steal from our group (right now we are stealing from all CPUs)? */
 	cpumask_clear_cpu(this_cpu, &cpus);
 	(void) cpumask_and(&cpus, &cpus, cpu_online_mask);
 
@@ -1042,7 +1077,7 @@ static int tdq_idled(struct ktz_tdq *this_tdq)
 		if (this_tdq->load)
 			return 0;
 
-		victim_cpu = sched_highest(sd, &cpus, steal_thresh);
+		victim_cpu = sched_highest(&cpus, steal_thresh);
 		if (victim_cpu == -1)
 			continue;
 
@@ -1095,6 +1130,7 @@ static void enqueue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 		interact_update(p);
 		pctcpu_update(ktz_se, false);
 	}
+
 	/* Update prio before putting into runq. */
 	compute_priority(p);
 	ktz_se->slice = 0;
@@ -1233,6 +1269,7 @@ static void set_next_task_ktz(struct rq *rq, struct task_struct *p, bool first)
 #ifdef CONFIG_SMP
 static void check_balance(struct rq *rq)
 {
+	printk("Check balance %d %d\n", PERIODIC_BALANCE, balance_ticks);
 	if (PERIODIC_BALANCE && balance_ticks && --balance_ticks == 0) {
 		sched_balance(rq);
 	}
@@ -1243,6 +1280,7 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 {
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(curr);
+	int hscore;
 
 	tdq->oldswitchcnt = tdq->switchcnt;
 	tdq->switchcnt = tdq->load;
@@ -1280,6 +1318,17 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	if (!TD_IS_IDLETHREAD(curr) && ++ktz_se->slice >= compute_slice(tdq)) {
 		ktz_se->slice = 0;
 		//ktz_se->flags |= TDF_SLICEEND;
+		resched_curr(rq);
+	}
+
+	/* HCS: core-group assignment
+	 * If the running process must change group mark it to be rescheduled.
+	 * When it is being rescheduled the scheduler will transfer it to the correct core-group.
+	 */
+	hscore = hcs_score(curr);
+	if (hscore > HCS_SCORE_THRESH && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+		resched_curr(rq);
+	} else if (hscore < HCS_SCORE_THRESH  && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
 		resched_curr(rq);
 	}
 }
@@ -1328,6 +1377,38 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 	struct ktz_tdq *this_tdq;
 	struct rq *rq0;
 
+	ktz_se = KTZ_SE(p);
+
+	/* 
+	 * HCS: Interactivity based core-group assignment.
+	 */
+
+	/* update interactivity score, FIXME: also happens in enqueue */
+	if (wake_flags & WF_TTWU) {
+		ktz_se->slptime += (jiffies - ktz_se->slptick) << SCHED_TICK_SHIFT;
+		ktz_se->slptick = 0;
+		interact_update(p);
+		pctcpu_update(ktz_se, false);
+	}
+
+	/* set core-group */
+	if (wake_flags & WF_TTWU) {
+		struct rq_flags rf;
+		int hscore = hcs_score(p);
+		if (hscore > HCS_SCORE_THRESH + 10 && cpumask_bits(&p->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+			do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
+		} else if (hscore < HCS_SCORE_THRESH - 10  && cpumask_bits(&p->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
+			do_set_cpus_allowed(p, &SMALL_CORE_GROUP_MASK);
+		}
+	} else if (wake_flags & WF_FORK) {
+		do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
+		ktz_se->slptime = 0;
+		ktz_se->runtime = 0; /* TODO: search for a good default value and create a constant for it*/
+	}
+
+	/* 
+	 * ULE: select_task_rq 
+	 */
 	rq0 = cpu_rq(0);
 	if (!rq0->sd) {
 		return 0;
@@ -1335,7 +1416,6 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 
 	curr_cpu = task_cpu(p);
 	curr_tdq = TDQ(task_rq(p));
-	ktz_se = KTZ_SE(p);
 	this_cpu = smp_processor_id();
 	pri = p->ktz_prio;
 	root_domain = get_top_domain(this_cpu);
@@ -1366,16 +1446,18 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 
 	/* If not top domain. */
 	if (last_domain && last_domain != root_domain) {
-		cpu = sched_lowest(last_domain, &(p->cpus_mask), max(pri, PRI_MAX_TIMESHARE), INT_MAX, curr_cpu);
+		cpumask_t cpumask;
+		cpumask_and(&cpumask, sched_domain_span(last_domain), &p->cpus_mask);
+		cpu = sched_lowest(&cpumask, max(pri, PRI_MAX_TIMESHARE), INT_MAX, curr_cpu);
 	}
 
 	/* Search globally for the less loaded CPU we can run now. */
 	if (cpu == -1) {
-		cpu = sched_lowest(root_domain, &(p->cpus_mask), pri, INT_MAX, curr_cpu);
+		cpu = sched_lowest(&(p->cpus_mask), pri, INT_MAX, curr_cpu);
 	}
 	/* Search globally for the less loaded CPU. */
 	if (cpu == -1) {
-		cpu = sched_lowest(root_domain, &(p->cpus_mask), -1, INT_MAX, curr_cpu);
+		cpu = sched_lowest(&(p->cpus_mask), -1, INT_MAX, curr_cpu);
 	}
 
 	if (cpu == -1) {
@@ -1428,7 +1510,7 @@ static int balance_ktz(struct rq *rq, struct task_struct *prev, struct rq_flags 
 	if (rq->nr_running)
 		return 1;
 	else
-		return 0;
+		return 0; // WIP, see balance_fair
 }
 
 static struct task_struct *pick_task_ktz(struct rq *rq)
