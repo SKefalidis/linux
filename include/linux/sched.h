@@ -721,6 +721,14 @@ struct sched_ktz_entity {
 	int		user_pri;
 	int		state;
 	int		preempted; /* Is this task being preempted ? */
+
+	/* HCS */
+	struct perf_event *cache_misses_event;
+	u64 cache_misses;
+	struct perf_event *itlb_misses_event;
+	u64 itlb_misses;
+	struct perf_event *dtlb_misses_event;
+	u64 dtlb_misses;
 };
 
 union rcu_special {
