@@ -781,6 +781,9 @@ struct ktz_tdq {
 #ifdef KTR
 	//char		loadname[TDQ_LOADNAME_LEN];
 #endif
+
+	struct task_struct *curr;
+	struct sched_avg avg;
 };
 
 #ifdef CONFIG_SMP
@@ -2927,6 +2930,7 @@ static inline unsigned long cpu_util_dl(struct rq *rq)
  *
  * Return: (Estimated) utilization for the specified CPU.
  */
+/* TODO: Disable UTIL_EST for a fair comparison */
 static inline unsigned long cpu_util_cfs(int cpu)
 {
 	struct cfs_rq *cfs_rq;
@@ -2942,6 +2946,19 @@ static inline unsigned long cpu_util_cfs(int cpu)
 
 	return min(util, capacity_orig_of(cpu));
 }
+
+/* TODO: Implement UTIL_EST as defined in the comments of cpu_util_cfs */
+static inline unsigned long cpu_util_ktz(int cpu)
+{
+	struct ktz_tdq *ktz_tdq;
+	unsigned long util;
+
+	ktz_tdq = &cpu_rq(cpu)->ktz;
+	util = READ_ONCE(ktz_tdq->avg.util_avg);
+
+	return min(util, capacity_orig_of(cpu));
+}
+
 
 static inline unsigned long cpu_util_rt(struct rq *rq)
 {
@@ -3014,7 +3031,7 @@ static inline bool uclamp_rq_is_capped(struct rq *rq)
 	if (!static_branch_likely(&sched_uclamp_used))
 		return false;
 
-	rq_util = cpu_util_cfs(cpu_of(rq)) + cpu_util_rt(rq);
+	rq_util = cpu_util_ktz(cpu_of(rq)) + cpu_util_rt(rq);
 	max_util = READ_ONCE(rq->uclamp[UCLAMP_MAX].value);
 
 	return max_util != SCHED_CAPACITY_SCALE && rq_util >= max_util;

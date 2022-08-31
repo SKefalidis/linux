@@ -6,6 +6,7 @@ int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se
 int __update_load_avg_cfs_rq(u64 now, struct cfs_rq *cfs_rq);
 int update_rt_rq_load_avg(u64 now, struct rq *rq, int running);
 int update_dl_rq_load_avg(u64 now, struct rq *rq, int running);
+int update_ktz_rq_load_avg(u64 now, struct rq *rq, int running);
 
 #ifdef CONFIG_SCHED_THERMAL_PRESSURE
 int update_thermal_load_avg(u64 now, struct rq *rq, u64 capacity);

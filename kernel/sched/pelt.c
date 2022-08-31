@@ -384,6 +384,20 @@ int update_dl_rq_load_avg(u64 now, struct rq *rq, int running)
 	return 0;
 }
 
+int update_ktz_rq_load_avg(u64 now, struct rq *rq, int running)
+{
+	if (___update_load_sum(now, &rq->ktz.avg,
+				running,
+				running,
+				rq->ktz.curr != NULL)) {
+
+		___update_load_avg(&rq->ktz.avg, 1);
+		return 1;
+	}
+
+	return 0;
+}
+
 #ifdef CONFIG_SCHED_THERMAL_PRESSURE
 /*
  * thermal:

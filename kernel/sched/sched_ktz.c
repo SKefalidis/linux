@@ -1,6 +1,8 @@
 #include <linux/random.h>
 #include <trace/events/sched.h>
 #include "sched.h"
+#include "pelt.h"
+#include <linux/sched/cputime.h>
 
 /* Macros and defines. */
 /* Timeshare range = Whole range of this scheduler. */
@@ -1164,6 +1166,12 @@ redo:
 		rq->idle_stamp = 0;
 #endif
 		next_task = tdq_choose(tdq, NULL);
+
+		update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 0);
+		cpufreq_update_util (rq, 0);
+
+		rq->ktz.curr = next_task;
+
 		return next_task;
 	}
 	else {
@@ -1188,6 +1196,8 @@ redo:
 			goto redo;
 		}
 		else {
+			update_idle_rq_clock_pelt(rq);
+
 			return NULL;	
 		}
 #else	/* !CONFIG_SMP */
@@ -1206,16 +1216,18 @@ static void put_prev_task_ktz(struct rq *rq, struct task_struct *prev)
 		tdq_runq_add(tdq, prev, ktz_se->preempted ? SRQ_PREEMPTED : 0);
 		ktz_se->preempted = 0; /* Reset preempted bit. */
 	}
+
+	update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 1);
+	cpufreq_update_util (rq, 0);
+
+	rq->ktz.curr = NULL;
 }
 
-/* Account for a task changing its policy or group.
- *
- * This routine is mostly called to set cfs_rq->curr field when a task
- * migrates between groups/classes.
- */
 static void set_next_task_ktz(struct rq *rq, struct task_struct *p, bool first)
 {
+	update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 0);
 
+	rq->ktz.curr = p;
 }
 
 #ifdef CONFIG_SMP
@@ -1260,6 +1272,10 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	interact_update(curr);
 	compute_priority(curr);
 	trace_inter(curr);
+
+	/* utilization */
+	update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 1);
+	cpufreq_update_util (rq, 0);
 
 	if (!TD_IS_IDLETHREAD(curr) && ++ktz_se->slice >= compute_slice(tdq)) {
 		ktz_se->slice = 0;
