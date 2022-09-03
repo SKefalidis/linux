@@ -794,7 +794,6 @@ static void sched_thread_priority(struct ktz_tdq *tdq, struct task_struct *td, i
 #ifdef CONFIG_SMP
 static void detach_task(struct rq *src_rq, struct task_struct *p, int dest_cpu)
 {
-	p->on_rq = TASK_ON_RQ_MIGRATING;
 	deactivate_task(src_rq, p, 0);
 	set_task_cpu(p, dest_cpu);
 }
@@ -805,7 +804,6 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 
 	BUG_ON(task_rq(p) != rq);
 	activate_task(rq, p, 0);
-	p->on_rq = TASK_ON_RQ_QUEUED;
 	check_preempt_curr(rq, p, 0);
 }
 
@@ -1135,6 +1133,8 @@ static void enqueue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 	compute_priority(p);
 	ktz_se->slice = 0;
 	tdq_add(tdq, p, 0);
+	p->on_rq = TASK_ON_RQ_QUEUED;
+
 	trace_inter(p);
 }
 
@@ -1155,6 +1155,8 @@ static void dequeue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 	tdq_load_rem(tdq, p);
 	if (p->ktz_prio == tdq->lowpri)
 		tdq_setlowpri(tdq, NULL);
+	p->on_rq = 0;
+
 	trace_inter(p);
 }
 
@@ -1403,7 +1405,7 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 	} else if (wake_flags & WF_FORK) {
 		do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
 		ktz_se->slptime = 0;
-		ktz_se->runtime = 0; /* TODO: search for a good default value and create a constant for it*/
+		ktz_se->runtime = 0; /* TODO: deal with this in task_fork */
 	}
 
 	/* 
