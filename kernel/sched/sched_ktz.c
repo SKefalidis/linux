@@ -475,6 +475,9 @@ static int interact_score(struct task_struct *p)
 
 static int hcs_score(struct task_struct *p)
 {
+	// use bias only if we are on the big cores to maybe move to the small cores
+	// it doesn't make sense to move a task from a small core to a big core because it uses the CPU effectively, since it doesn't use it enough to warrant moving to the big core anyway
+
 	return interact_score(p);
 }
 
@@ -659,20 +662,31 @@ static inline void tdq_runq_rem(struct ktz_tdq *tdq, struct task_struct *td)
 /*
  * Pick the highest priority task we have and return it.
  */
-static struct task_struct *tdq_choose(struct ktz_tdq *tdq, struct task_struct *except)
+static struct task_struct *tdq_choose(struct ktz_tdq *tdq, struct task_struct *except, bool find_lowest_priority)
 {
 	struct task_struct *td;
 
 	TDQ_LOCK_ASSERT(tdq, MA_OWNED);
-	td = runq_choose(&tdq->realtime, except);
-	if (td != NULL) {
-		return (td);
+	if (find_lowest_priority == false) {
+		td = runq_choose(&tdq->realtime, except, find_lowest_priority);
+		if (td != NULL) {
+			return (td);
+		}
+		td = runq_choose_from(&tdq->timeshare, tdq->ridx, except, find_lowest_priority);
+		if (td != NULL) {
+			return td;
+		}
+	} else {
+		td = runq_choose_from(&tdq->timeshare, tdq->ridx, except, find_lowest_priority);
+		if (td != NULL) {
+			return td;
+		}
+		td = runq_choose(&tdq->realtime, except, find_lowest_priority);
+		if (td != NULL) {
+			return (td);
+		}
 	}
-	td = runq_choose_from(&tdq->timeshare, tdq->ridx, except);
-	if (td != NULL) {
-		return td;
-	}
-	td = runq_choose(&tdq->idle, except);
+	td = runq_choose(&tdq->idle, except, find_lowest_priority);
 	if (td != NULL) {
 		BUG();
 		return td;
@@ -747,7 +761,7 @@ static void tdq_setlowpri(struct ktz_tdq *tdq, struct task_struct *ctd)
 	TDQ_LOCK_ASSERT(tdq, MA_OWNED);
 	if (ctd == NULL)
 		ctd = rq->curr;
-	td = tdq_choose(tdq, NULL);
+	td = tdq_choose(tdq, NULL, false);
 	if (td == NULL || td->ktz_prio > ctd->ktz_prio)
 		tdq->lowpri = ctd->ktz_prio;
 	else
@@ -1020,6 +1034,222 @@ nextlow:
 	return moved;
 }
 
+static void move_task_between_cores_of_different_groups(struct task_struct *p, struct rq *high_rq, struct rq *low_rq, cpumask_t *new_cpumask)
+{
+	unsigned long flags;
+	bool running;
+
+	/* remove process from one core-group */
+	raw_spin_lock_irqsave(&high_rq->__lock, flags);
+	running = task_current(high_rq, p);
+	if (running) {
+		BUG(); /* unsupported by the ULE port */
+		put_prev_task(high_rq, p);
+	}
+	do_set_cpus_allowed(p, new_cpumask);
+	detach_task(high_rq, p, low_rq->cpu);
+	if (running)
+		set_next_task(high_rq, p);
+	raw_spin_unlock(&high_rq->__lock);
+	local_irq_restore(flags);
+
+	/* move process to the other core-group */
+	raw_spin_lock_irqsave(&low_rq->__lock, flags);
+	attach_task(low_rq, p);
+	raw_spin_unlock(&low_rq->__lock);
+	local_irq_restore(flags);
+	resched_curr(low_rq);
+}
+
+static void move_task_to_core_group(struct task_struct *p, cpumask_t *new_cpumask)
+{
+	struct rq 		*old_rq;
+	struct rq 	 	*new_rq;
+	int				 old;
+	int				 new;
+
+	old = p->on_cpu;
+	new = sched_lowest(new_cpumask, -1, INT_MAX, -1);
+
+	old_rq = cpu_rq(old);
+	new_rq = cpu_rq(new);
+
+	move_task_between_cores_of_different_groups(p, old_rq, new_rq, new_cpumask);
+}
+
+static int sched_hcs_balance_groups(struct sched_domain *sd)
+{
+	/* get utilization of core-groups */
+	unsigned int 		 small_core_group_util;
+	unsigned int 		 big_core_group_util;
+	int 		 		 cpu;
+	struct ktz_tdq 		*tdq_high;
+	struct ktz_tdq 		*tdq_low;
+	struct rq 			*high_rq;
+	struct rq 			*low_rq;
+	struct task_struct 	*p;
+	int 				 high, low;
+	int					 moved = 0;
+	int 				 last_moved_hcs_score = -1;
+	bool				 moved_from_no_mans_land = false;
+
+	for_each_cpu(cpu, &SMALL_CORE_GROUP_MASK) {
+		small_core_group_util += cpu_util_ktz_percentage(cpu);
+	}
+	small_core_group_util /= cpumask_weight (&SMALL_CORE_GROUP_MASK);
+
+	for_each_cpu(cpu, &BIG_CORE_GROUP_MASK) {
+		big_core_group_util += cpu_util_ktz_percentage(cpu);
+	}
+	big_core_group_util /= cpumask_weight (&BIG_CORE_GROUP_MASK);
+
+	/* if neither group is extremely loaded we don't need to do anything */
+	if (small_core_group_util < SMALL_CORE_GROUP_LOAD_LIMIT && big_core_group_util < BIG_CORE_GROUP_LOAD_LIMIT)
+		return 0;
+
+	/* if both groups are overloaded, use lottery scheduling */
+	if (small_core_group_util > SMALL_CORE_GROUP_LOAD_LIMIT && big_core_group_util > BIG_CORE_GROUP_LOAD_LIMIT) {
+		/* TODO: enable lottery scheduling */
+		return 0;
+	}
+
+	/* if one group is under heavy load and the other one is not do the following (general idea):
+	 1. Move any tasks that are in the "no-man's land" of hcs-score away from the overloaded group 
+	    Alternatively we could set hcs_score_deviation to null for the overloaded group (maybe we can do both, since we have an upper bound for processes moved in this function).
+	 2. If there are no such tasks, move tasks from the overloaded group:
+	 	- If the small-score group is overloaded, move multiple tasks to the big-core group.
+		- If the big-core group is overloaded, move one (or maybe two) task(s) for each small-core to the small-core group.
+		In this case, the group which is not overloaded also expands its ownership over the range of hcs-score values. Specifically,
+		it takes ownership in such a way that the last stolen process is placed in the middle of the "no-man's land" of hsc-scores.
+	*/
+	if (small_core_group_util > SMALL_CORE_GROUP_LOAD_LIMIT) {
+		/* move from no man's land
+			Stop when there are either no more processes in no-man's land or we have moved enough processes.
+			If you have moved a number of processes equal or larger than the number of small cores, then stop migrating processes,
+			otherwise, continue migrating proceses in the second step 
+		*/
+		while (true) {
+			high = sched_highest(&SMALL_CORE_GROUP_MASK, 1); /* FIXME: searches for the CPU with the most number of processes, instead of that
+																we should search for processes in no-man's land in all CPUs */
+			low = sched_lowest(&BIG_CORE_GROUP_MASK, -1, INT_MAX, -1);
+			if (high == -1 || low == -1)
+				return 0;
+
+			high_rq = cpu_rq(high);
+			low_rq = cpu_rq(low);
+			tdq_high = TDQ(high_rq);
+			tdq_low = TDQ(low_rq);
+
+			p = tdq_choose(tdq_high, task_current(high_rq, p), true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
+			if (interact_score(p) > hcs_score_threshold) {
+				move_task_between_cores_of_different_groups(p, high_rq, low_rq, &BIG_CORE_GROUP_MASK);
+				moved_from_no_mans_land = true;
+			} else if (moved_from_no_mans_land && moved >= cpumask_weight (&SMALL_CORE_GROUP_MASK)) {
+				/* there are no more processes in no man's land, but we have moved enough processes already */
+				return 0;
+			} else {
+				/* there are no processes in no man's land */
+				break;
+			}
+
+			moved++;
+			/* we have moved twice as many processes as there are small cores, this should be enough */
+			if (moved == cpumask_weight (&SMALL_CORE_GROUP_MASK) * 2)
+				return 0;
+		}
+
+		/* expand the ownership of the big-core group over the hcs-score range
+			If you have moved a number of processes equal or larger than the number of small cores, then stop migrating processes,
+			otherwise, continue migrating proceses in the second step 
+		*/
+		while (true) {
+			high = sched_highest(&SMALL_CORE_GROUP_MASK, 1); /* FIXME: searches for the CPU with the most number of processes, instead of that
+																we should search for the heaviest processes in all CPUs */
+			low = sched_lowest(&BIG_CORE_GROUP_MASK, -1, INT_MAX, -1);
+			if (high == -1 || low == -1)
+				return 0;
+
+			high_rq = cpu_rq(high);
+			low_rq = cpu_rq(low);
+			tdq_high = TDQ(high_rq);
+			tdq_low = TDQ(low_rq);
+
+			p = tdq_choose(tdq_high, task_current(high_rq, p), true);
+			last_moved_hcs_score = hcs_score(p);
+			move_task_between_cores_of_different_groups(p, high_rq, low_rq, &BIG_CORE_GROUP_MASK);
+
+			moved++;
+			/* we have moved twice as many processes as there are small cores, this should be enough */
+			if (moved == cpumask_weight (&SMALL_CORE_GROUP_MASK) * 2)
+				break;
+		}
+
+		hcs_score_threshold = last_moved_hcs_score - hsc_score_deviation / 2;
+	} else {
+		/* move from no man's land
+			Stop when there are either no more processes in no-man's land or we have moved enough processes.
+			If you have moved a number of processes equal or larger than the number of small cores, then stop migrating processes,
+			otherwise, continue migrating proceses in the second step 
+		*/
+		while (true) {
+			high = sched_highest(&BIG_CORE_GROUP_MASK, 1); /* FIXME: searches for the CPU with the most number of processes, instead of that
+																we should search for processes in no-man's land in all CPUs */
+			low = sched_lowest(&SMALL_CORE_GROUP_MASK, -1, INT_MAX, -1);
+			if (high == -1 || low == -1)
+				return 0;
+
+			high_rq = cpu_rq(high);
+			low_rq = cpu_rq(low);
+			tdq_high = TDQ(high_rq);
+			tdq_low = TDQ(low_rq);
+
+			p = tdq_choose(tdq_high, task_current(high_rq, p), true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
+			if (interact_score(p) > hcs_score_threshold) {
+				move_task_between_cores_of_different_groups(p, high_rq, low_rq, &SMALL_CORE_GROUP_MASK);
+				moved_from_no_mans_land = true;
+			} else {
+				/* there are no processes in no man's land */
+				break;
+			}
+
+			moved++;
+			/* we have moved as many processes as there are small cores, this should be enough */
+			if (moved == cpumask_weight (&SMALL_CORE_GROUP_MASK))
+				return 0;
+		}
+
+		/* expand the ownership of the small-core group over the hcs-score range
+			If you have moved a number of processes equal or larger than the number of small cores, then stop migrating processes,
+			otherwise, continue migrating proceses in the second step 
+		*/
+		while (true) {
+			high = sched_highest(&BIG_CORE_GROUP_MASK, 1); /* FIXME: searches for the CPU with the most number of processes, instead of that
+																we should search for the heaviest processes in all CPUs */
+			low = sched_lowest(&SMALL_CORE_GROUP_MASK, -1, INT_MAX, -1);
+			if (high == -1 || low == -1)
+				return 0;
+
+			high_rq = cpu_rq(high);
+			low_rq = cpu_rq(low);
+			tdq_high = TDQ(high_rq);
+			tdq_low = TDQ(low_rq);
+
+			p = tdq_choose(tdq_high, task_current(high_rq, p), true);
+			last_moved_hcs_score = hcs_score(p);
+			move_task_between_cores_of_different_groups(p, high_rq, low_rq, &SMALL_CORE_GROUP_MASK);
+
+			moved++;
+			/* we have moved twice as many processes as there are small cores, this should be enough */
+			if (moved == cpumask_weight (&SMALL_CORE_GROUP_MASK))
+				break;
+		}
+
+		hcs_score_threshold = last_moved_hcs_score + hsc_score_deviation / 2;
+	}
+
+	return 0;
+}
+
 static int sched_balance(struct rq *rq)
 {
 	int moved;
@@ -1203,7 +1433,7 @@ redo:
 #ifdef CONFIG_SMP
 		rq->idle_stamp = 0;
 #endif
-		next_task = tdq_choose(tdq, NULL);
+		next_task = tdq_choose(tdq, NULL, false);
 
 		update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 0);
 		cpufreq_update_util (rq, 0);
@@ -1328,9 +1558,9 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	 * When it is being rescheduled the scheduler will transfer it to the correct core-group.
 	 */
 	hscore = hcs_score(curr);
-	if (hscore > HCS_SCORE_THRESH && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
-		resched_curr(rq);
-	} else if (hscore < HCS_SCORE_THRESH  && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
+	if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+		resched_curr(rq); /* FIXME: does this really lead to a change of core-group? */
+	} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
 		resched_curr(rq);
 	}
 }
@@ -1397,9 +1627,9 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 	if (wake_flags & WF_TTWU) {
 		struct rq_flags rf;
 		int hscore = hcs_score(p);
-		if (hscore > HCS_SCORE_THRESH + 10 && cpumask_bits(&p->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_bits(&p->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
 			do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
-		} else if (hscore < HCS_SCORE_THRESH - 10  && cpumask_bits(&p->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
+		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_bits(&p->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
 			do_set_cpus_allowed(p, &SMALL_CORE_GROUP_MASK);
 		}
 	} else if (wake_flags & WF_FORK) {

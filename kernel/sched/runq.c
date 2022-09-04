@@ -88,11 +88,11 @@ static inline struct task_struct *ktz_task_of(struct sched_ktz_entity *ktz_se)
 }
 
 /*
- * Find the highest priority process on the run queue.
+ * Find the highest/lowest priority process on the run queue.
  */
-struct task_struct *runq_choose(struct runq *rq, struct task_struct *except)
+struct task_struct *runq_choose(struct runq *rq, struct task_struct *except, bool find_lowest_priority)
 {
-	return runq_choose_from(rq, 0, except);
+	return runq_choose_from(rq, 0, except, find_lowest_priority);
 }
 
 static int runq_findbit_from(struct runq *q, int idx)
@@ -110,12 +110,26 @@ static int runq_findbit_from(struct runq *q, int idx)
 	}
 }
 
-struct task_struct *runq_choose_from(struct runq *rq, int idx, struct task_struct *except)
+struct task_struct *runq_choose_from(struct runq *rq, int idx, struct task_struct *except, bool find_lowest_priority)
 {
 	struct list_head *rqh;
 	struct sched_ktz_entity  *tmp;
 	struct sched_ktz_entity *first;
 	int pri;
+
+	if (find_lowest_priority) {
+		pri = find_last_bit (rq->status, KTZ_HEADS_PER_RUNQ);
+		if (pri == KTZ_HEADS_PER_RUNQ)
+			return NULL;
+		rqh = &rq->queues[pri];
+		first = list_first_entry(rqh, struct sched_ktz_entity, runq);
+		if (ktz_task_of(first) == except)
+			first = list_last_entry(rqh, struct sched_ktz_entity, runq);	
+		if (ktz_task_of(first) == except)
+			BUG(); /* FIXME: it looks like there is only one task in this priority and it's the currently running one, unfortunate */
+		
+		return ktz_task_of(first);
+	}
 
 retry:
 	if ((pri = runq_findbit_from(rq, idx)) != -1) {

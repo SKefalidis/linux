@@ -2959,6 +2959,16 @@ static inline unsigned long cpu_util_ktz(int cpu)
 	return min(util, capacity_orig_of(cpu));
 }
 
+static inline unsigned int cpu_util_ktz_percentage(int cpu)
+{
+	struct ktz_tdq *ktz_tdq;
+	unsigned long util;
+
+	ktz_tdq = &cpu_rq(cpu)->ktz;
+	util = READ_ONCE(ktz_tdq->avg.util_avg);
+
+	return (min(util, capacity_orig_of(cpu)) / capacity_orig_of(cpu)) * 100;
+}
 
 static inline unsigned long cpu_util_rt(struct rq *rq)
 {
