@@ -123,22 +123,35 @@ DEFINE_PER_CPU(uint32_t, randomval);
 
 
 
-static inline void 	trace_load			(struct ktz_tdq *tdq);
-static inline void 	trace_plb			(void);
-static inline void 	trace_inter			(struct task_struct *p);
+/* Trace functions */
+static inline void 	trace_load			    (struct ktz_tdq *tdq);
+static inline void 	trace_plb			    (void);
+static inline void 	trace_inter			    (struct task_struct *p);
 
-static inline void	print_groups		(struct sched_domain *sd);
-static inline void	print_sched_domain	(int cpu);
-static inline void 	print_stats			(struct task_struct *p);
-static inline void 	print_runq			(struct runq *q);
-static inline void 	print_tdq			(struct ktz_tdq *tdq);
-static inline void 	print_all_tdqs		(void);
-static inline void 	print_children		(struct task_struct *p);
-static inline void 	print_loads			(void);
+/* Print/Debug functions */
+static inline void	print_groups		    (struct sched_domain *sd);
+static inline void	print_sched_domain	    (int cpu);
+static inline void 	print_stats			    (struct task_struct *p);
+static inline void 	print_runq			    (struct runq *q);
+static inline void 	print_tdq			    (struct ktz_tdq *tdq);
+static inline void 	print_all_tdqs		    (void);
+static inline void 	print_children		    (struct task_struct *p);
+static inline void 	print_loads			    (void);
 
-static uint32_t 	sched_random		(void);
+/* Utility functions */
+static uint32_t 	sched_random		    (void);
+static int          cpu_search              (cpumask_t *cpumask, struct cpu_search *low, struct cpu_search *high, const int match);
+static inline int   cpu_search_lowest       (struct cpu_search *low);
+static inline int   cpu_search_highest      (struct cpu_search *high);
+static inline int   sched_lowest            (struct cpumask *mask, int pri, int maxload, int prefer);
+static inline int   sched_highest           (struct cpumask *mask, int minload);
+static struct sched_domain*
+                    get_top_domain          (int cpu);
+static inline struct task_struct*
+                    ktz_task_of             (struct sched_ktz_entity *ktz_se);
+static inline bool  is_enqueued             (struct task_struct *p);
 
-/* Scheduler interface */
+/* Scheduler interface functions */
 static void 		enqueue_task_ktz		(struct rq *rq, struct task_struct *p, int flags);
 static void 		dequeue_task_ktz		(struct rq *rq, struct task_struct *p, int flags);
 static void 		check_preempt_curr_ktz	(struct rq *rq, struct task_struct *p, int flags);
@@ -158,8 +171,8 @@ static struct task_struct*
 static void 		yield_task_ktz			(struct rq *rq);
 static void 		switched_from_ktz		(struct rq *rq, struct task_struct *p);
 static void 		switched_to_ktz			(struct rq *rq, struct task_struct *p);
-static void 		prio_changed_ktz		(struct rq*rq, struct task_struct *p, int oldprio);
-static void 		update_curr_ktz			(struct rq*rq);
+static void 		prio_changed_ktz		(struct rq *rq, struct task_struct *p, int oldprio);
+static void 		update_curr_ktz			(struct rq *rq);
 
 
 
@@ -205,125 +218,6 @@ DEFINE_SCHED_CLASS(ktz) = {
 };
 
 
-
-#ifdef CONFIG_SMP
-static struct sched_domain *get_top_domain(int cpu)
-{
-	struct sched_domain *curr = rcu_dereference(per_cpu(sd_llc, cpu));
-	while (curr->parent) {
-		curr = curr->parent;
-	}
-	return curr;
-}
-
-
-#define	CPU_SEARCH_LOWEST	0x1
-#define	CPU_SEARCH_HIGHEST	0x2
-#define	CPU_SEARCH_BOTH		(CPU_SEARCH_LOWEST|CPU_SEARCH_HIGHEST)
-
-struct cpu_search {
-	struct cpumask *cs_mask;
-	int	cs_prefer;
-	int	cs_pri;		/* Min priority for low. */
-	int	cs_limit;	/* Max load for low, min load for high. */
-	int	cs_cpu;
-	int	cs_load;
-};
-
-static int cpu_search(cpumask_t *cpumask, struct cpu_search *low, struct cpu_search *high, const int match)
-{
-	struct cpu_search lgroup;
-	struct cpu_search hgroup;
-	struct cpumask cpumask_c;
-	struct ktz_tdq *tdq;
-	int cpu, hload, lload, load, total, rnd;
-
-	cpumask_copy(&cpumask_c, cpumask);
-
-	/* Avoid warnings. */
-	hgroup.cs_cpu = -1;
-	lgroup.cs_cpu = -1;
-	lgroup.cs_load = INT_MAX;
-	hgroup.cs_load = INT_MIN;
-
-	total = 0;
-
-	if (match & CPU_SEARCH_LOWEST) {
-		lload = INT_MAX;
-		lgroup = *low;
-	}
-	if (match & CPU_SEARCH_HIGHEST) {
-		hload = INT_MIN;
-		hgroup = *high;
-	}
-
-	/* Iterate through the child CPU groups and then remaining CPUs. */
-	for_each_cpu(cpu, &cpumask_c) {
-		if (match & CPU_SEARCH_LOWEST)
-			lgroup.cs_cpu = -1;
-		if (match & CPU_SEARCH_HIGHEST)
-			hgroup.cs_cpu = -1;
-		cpumask_clear_cpu(cpu, &cpumask_c);
-		tdq = TDQ(cpu_rq(cpu));
-		load = tdq->load * 256;
-		rnd = sched_random() % 32;
-		if (match & CPU_SEARCH_LOWEST) {
-			if (cpu == low->cs_prefer)
-				load -= 64;
-			/* If that CPU is allowed and get data. */
-			if (tdq->lowpri > lgroup.cs_pri &&
-			    tdq->load <= lgroup.cs_limit &&
-			    cpumask_test_cpu(cpu, lgroup.cs_mask)) {
-				lgroup.cs_cpu = cpu;
-				lgroup.cs_load = load - rnd;
-			}
-		}
-		if (match & CPU_SEARCH_HIGHEST)
-			if (tdq->load >= hgroup.cs_limit &&
-			    cpumask_test_cpu(cpu, hgroup.cs_mask)) {
-				hgroup.cs_cpu = cpu;
-				hgroup.cs_load = load - rnd;
-			}
-		total += load;
-
-		/* We have info about child item. Compare it. */
-		if (match & CPU_SEARCH_LOWEST) {
-			if (lgroup.cs_cpu >= 0 &&
-			    (load < lload ||
-			     (load == lload && lgroup.cs_load < low->cs_load))) {
-				lload = load;
-				low->cs_cpu = lgroup.cs_cpu;
-				low->cs_load = lgroup.cs_load;
-			}
-		}
-		if (match & CPU_SEARCH_HIGHEST) {
-			if (hgroup.cs_cpu >= 0 &&
-			    (load > hload ||
-			     (load == hload && hgroup.cs_load > high->cs_load))) {
-				hload = load;
-				high->cs_cpu = hgroup.cs_cpu;
-				high->cs_load = hgroup.cs_load;
-			}
-		}
-	}
-	return (total);
-}
-
-inline int cpu_search_lowest(struct cpu_search *low)
-{
-	return cpu_search(low->cs_mask, low, NULL, CPU_SEARCH_LOWEST);
-}
-
-inline int cpu_search_highest(struct cpu_search *high)
-{
-	return cpu_search(high->cs_mask, NULL, high, CPU_SEARCH_HIGHEST);
-}
-
-// inline int cpu_search_both(struct sched_domain *cg, struct cpu_search *low, struct cpu_search *high)
-// {
-// 	return cpu_search(NULL, low, high, CPU_SEARCH_BOTH);
-// }
-#endif
 
 #define PRINT(name)	printk_deferred(#name "\t\t = %d", name)
 
@@ -375,11 +269,6 @@ void init_ktz_tdq(struct ktz_tdq *ktz_tdq)
 }
 
 #undef PRINT
-
-static inline struct task_struct *ktz_task_of(struct sched_ktz_entity *ktz_se)
-{
-	return container_of(ktz_se, struct task_struct, ktz_se);
-}
 
 static void pctcpu_update(struct sched_ktz_entity *ts, bool run)
 {
@@ -744,11 +633,6 @@ static void sched_interact_fork(struct task_struct *td)
 		ts->slptime /= ratio;
 	}
 }
- 
-static inline bool is_enqueued(struct task_struct *p)
-{
-	return KTZ_SE(p)->curr_runq;
-}
 
 /*
  * Set lowpri to its exact value by searching the run-queue and
@@ -822,32 +706,6 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 	check_preempt_curr(rq, p, 0);
 }
 
-static inline int sched_highest(struct cpumask *mask, int minload)
-{
-	struct cpu_search high;
-
-	high.cs_cpu = -1;
-	high.cs_mask = mask;
-	high.cs_limit = minload;
-	cpu_search_highest(&high);
-
-	return high.cs_cpu;
-}
-
-static inline int sched_lowest(struct cpumask *mask, int pri, int maxload, int prefer)
-{
-	struct cpu_search low;
-
-	low.cs_cpu = -1;
-	low.cs_prefer = prefer;
-	low.cs_mask = mask;
-	low.cs_pri = pri;
-	low.cs_limit = maxload;
-	cpu_search_lowest(&low);
-
-	return low.cs_cpu;
-}
-
 static bool can_migrate(struct task_struct *p, int to_cpu)
 {
 	BUG_ON(p == NULL);
@@ -915,26 +773,6 @@ static struct task_struct *tdq_steal(struct ktz_tdq *tdq, int cpu)
 		BUG();
 	return NULL;
 }
-
-/*
- * Move a thread from one thread queue to another.
- */
-/*static int tdq_move(struct ktz_tdq *from, struct ktz_tdq *to)
-{
-	struct task_struct *td;
-	struct ktz_tdq *tdq;
-	int cpu;
-
-	tdq = from;
-	cpu = RQ(to)->cpu;
-	td = tdq_steal(tdq, cpu);
-	if (td == NULL) {
-		return 0;
-	}
-	detach_task(RQ(from), td, cpu);
-	attach_task(RQ(to), td);
-	return 1;
-}*/
 
 /*
  * Transfer load between two imbalanced thread queues.
@@ -1798,9 +1636,11 @@ static struct task_struct *pick_task_ktz(struct rq *rq)
 	BUG();
 }
 
-/**
- *  As defined in BSD
+/*
+ *  Utility functions
  */
+
+/* As defined in FreeBSD */
 static uint32_t sched_random(void)
 {
 	uint32_t *rnd = &get_cpu_var(randomval);
@@ -1812,6 +1652,155 @@ static uint32_t sched_random(void)
 
 	return *rnd >> 16;
 }
+
+static inline struct task_struct *ktz_task_of(struct sched_ktz_entity *ktz_se)
+{
+	return container_of(ktz_se, struct task_struct, ktz_se);
+}
+
+static inline bool is_enqueued(struct task_struct *p)
+{
+	return KTZ_SE(p)->curr_runq;
+}
+
+/* CPU search */
+#ifdef CONFIG_SMP
+#define	CPU_SEARCH_LOWEST	0x1
+#define	CPU_SEARCH_HIGHEST	0x2
+
+struct cpu_search {
+	struct cpumask *cs_mask;
+	int	cs_prefer;
+	int	cs_pri;		/* Min priority for low. */
+	int	cs_limit;	/* Max load for low, min load for high. */
+	int	cs_cpu;
+	int	cs_load;
+};
+
+static struct sched_domain *get_top_domain(int cpu)
+{
+	struct sched_domain *curr = rcu_dereference(per_cpu(sd_llc, cpu));
+	while (curr->parent) {
+		curr = curr->parent;
+	}
+	return curr;
+}
+
+static int cpu_search(cpumask_t *cpumask, struct cpu_search *low, struct cpu_search *high, const int match)
+{
+	struct cpu_search lgroup;
+	struct cpu_search hgroup;
+	struct cpumask cpumask_c;
+	struct ktz_tdq *tdq;
+	int cpu, hload, lload, load, total, rnd;
+
+	cpumask_copy(&cpumask_c, cpumask);
+
+	/* Avoid warnings. */
+	hgroup.cs_cpu = -1;
+	lgroup.cs_cpu = -1;
+	lgroup.cs_load = INT_MAX;
+	hgroup.cs_load = INT_MIN;
+
+	total = 0;
+
+	if (match & CPU_SEARCH_LOWEST) {
+		lload = INT_MAX;
+		lgroup = *low;
+	}
+	if (match & CPU_SEARCH_HIGHEST) {
+		hload = INT_MIN;
+		hgroup = *high;
+	}
+
+	/* Iterate through the child CPU groups and then remaining CPUs. */
+	for_each_cpu(cpu, &cpumask_c) {
+		if (match & CPU_SEARCH_LOWEST)
+			lgroup.cs_cpu = -1;
+		if (match & CPU_SEARCH_HIGHEST)
+			hgroup.cs_cpu = -1;
+		cpumask_clear_cpu(cpu, &cpumask_c);
+		tdq = TDQ(cpu_rq(cpu));
+		load = tdq->load * 256;
+		rnd = sched_random() % 32;
+		if (match & CPU_SEARCH_LOWEST) {
+			if (cpu == low->cs_prefer)
+				load -= 64;
+			/* If that CPU is allowed and get data. */
+			if (tdq->lowpri > lgroup.cs_pri &&
+			    tdq->load <= lgroup.cs_limit &&
+			    cpumask_test_cpu(cpu, lgroup.cs_mask)) {
+				lgroup.cs_cpu = cpu;
+				lgroup.cs_load = load - rnd;
+			}
+		}
+		if (match & CPU_SEARCH_HIGHEST)
+			if (tdq->load >= hgroup.cs_limit &&
+			    cpumask_test_cpu(cpu, hgroup.cs_mask)) {
+				hgroup.cs_cpu = cpu;
+				hgroup.cs_load = load - rnd;
+			}
+		total += load;
+
+		/* We have info about child item. Compare it. */
+		if (match & CPU_SEARCH_LOWEST) {
+			if (lgroup.cs_cpu >= 0 &&
+			    (load < lload ||
+			     (load == lload && lgroup.cs_load < low->cs_load))) {
+				lload = load;
+				low->cs_cpu = lgroup.cs_cpu;
+				low->cs_load = lgroup.cs_load;
+			}
+		}
+		if (match & CPU_SEARCH_HIGHEST) {
+			if (hgroup.cs_cpu >= 0 &&
+			    (load > hload ||
+			     (load == hload && hgroup.cs_load > high->cs_load))) {
+				hload = load;
+				high->cs_cpu = hgroup.cs_cpu;
+				high->cs_load = hgroup.cs_load;
+			}
+		}
+	}
+	return (total);
+}
+
+static inline int cpu_search_lowest(struct cpu_search *low)
+{
+	return cpu_search(low->cs_mask, low, NULL, CPU_SEARCH_LOWEST);
+}
+
+static inline int cpu_search_highest(struct cpu_search *high)
+{
+	return cpu_search(high->cs_mask, NULL, high, CPU_SEARCH_HIGHEST);
+}
+
+static inline int sched_lowest(struct cpumask *mask, int pri, int maxload, int prefer)
+{
+	struct cpu_search low;
+
+	low.cs_cpu = -1;
+	low.cs_prefer = prefer;
+	low.cs_mask = mask;
+	low.cs_pri = pri;
+	low.cs_limit = maxload;
+	cpu_search_lowest(&low);
+
+	return low.cs_cpu;
+}
+
+static inline int sched_highest(struct cpumask *mask, int minload)
+{
+	struct cpu_search high;
+
+	high.cs_cpu = -1;
+	high.cs_mask = mask;
+	high.cs_limit = minload;
+	cpu_search_highest(&high);
+
+	return high.cs_cpu;
+}
+#endif // CONFIG_SMP
 
 /*
  * Trace functions
