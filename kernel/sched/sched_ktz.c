@@ -1107,9 +1107,52 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 	if (small_core_group_util < SMALL_CORE_GROUP_LOAD_LIMIT && big_core_group_util < BIG_CORE_GROUP_LOAD_LIMIT)
 		return 0;
 
-	/* if both groups are overloaded, use lottery scheduling */
+	/* if both groups are overloaded, use lottery scheduling:
+	1. Try to keep a balanced load between core groups. Currently, because of the way HCS/ULE works, we migrate some processes from the big-core group to the small-core group. New processes
+	are added in the big-core group which also contains the batch processes, so it is almost certain that it is far more loaded than the small-core group (TODO: Use PELT).
+		ex1: 4/4 system: make -j6 -> 6 heavy processes are added in the big-core group -> at most 4 of the lightest rpocesses get moved to the small core group, if the big-core group contains
+		no other processes that means that 2 compile jobs are move to the small core group.	
+		ex2: 4/4 system: sudden burst of activity in 2 cores of the small core group -> processes get moved to the big core group (interactivity mehcanism), make -j6 -> 6 more heavy processes for a total of 8 batch tasks
+		-> 4 of them get moved to the small-core group.
+	The main issues with this approach is that because of ULE's load balancing small-cores would probably work more efficiently if all small tasks were moved away from small cores which are under heavy load (either because
+	of this load balancing or because of some other reason). That's why rewriting ULE's load balancing using PELT could prove advantegeous.
+	2. Run the lottery algorithm (only on batch processes).
+	*/
+	/* heuristic for tasks in the lottery? Is there a way to tell if a task is likely to be mischeduled by the bias? */
 	if (small_core_group_util > SMALL_CORE_GROUP_LOAD_LIMIT && big_core_group_util > BIG_CORE_GROUP_LOAD_LIMIT) {
-		/* TODO: enable lottery scheduling */
+		/* 1. Don't do anything if the small-core group is already overutilized (95 chosen as a placeholder value until proper load-tracking is implemented for the runqueue) */
+		if (small_core_group_util < 95) {
+			unsigned int small_core_group_process_count = 0;
+			unsigned int big_core_group_process_count = 0;
+
+			for_each_cpu(cpu, &SMALL_CORE_GROUP_MASK) {
+				struct rq *rq = cpu_rq(cpu);
+				small_core_group_process_count += rq->nr_running;
+			}
+			for_each_cpu(cpu, &BIG_CORE_GROUP_MASK) {
+				struct rq *rq = cpu_rq(cpu);
+				big_core_group_process_count += rq->nr_running;
+			}
+
+			while (big_core_group_process_count > cpumask_weight (&BIG_CORE_GROUP_MASK) && moved < cpumask_weight (&SMALL_CORE_GROUP_MASK)) {
+				/* migrate one process to the small core group */
+				big_core_group_process_count--;
+				moved++;
+			}
+		}
+
+		/* 2. Run when both core groups are under extremely heavy load (TODO: Use PELT) caused by a number of heavy processes. */
+		if (small_core_group_util > 99 && big_core_group_util > 99) {
+			/* move BIG_CORE_GROUP_n processes between the 2 groups. To select the processes:
+			1. Do not choose running processes (it's not supported by the ULE port for now).
+			2. Randomly select processes based on the bias of the processes and the runtime on each core-type:
+			- Each runqueue knows the amount of tickets on each core.
+			- Select BIG_CORE_GROUP_n tickets.
+			- Split the tickets between the cores of the small-core group.
+			- As the task_tick function runs on each core, count tickets. When you reach a selected ticket number, mark the current process to be moved to the big core group and steal a process from the big core group.
+			*/
+		}
+
 		return 0;
 	}
 
