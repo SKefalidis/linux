@@ -3,6 +3,7 @@
 #include "sched.h"
 #include "pelt.h"
 #include <linux/sched/cputime.h>
+#include <linux/sched/hcs.h>
 
 /* Macros and defines. */
 /* Timeshare range = Whole range of this scheduler. */
@@ -1141,6 +1142,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			}
 		}
 
+#ifdef HCS_LOTTERY_SCHEDULING
 		/* 2. Run when both core groups are under extremely heavy load (TODO: Use PELT) caused by a number of heavy processes. */
 		if (small_core_group_util > 99 && big_core_group_util > 99) {
 			/* move BIG_CORE_GROUP_n processes between the 2 groups. To select the processes:
@@ -1152,6 +1154,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			- As the task_tick function runs on each core, count tickets. When you reach a selected ticket number, mark the current process to be moved to the big core group and steal a process from the big core group.
 			*/
 		}
+#endif // HCS_LOTTERY_SCHEDULING
 
 		return 0;
 	}
@@ -1310,7 +1313,9 @@ static int sched_balance(struct rq *rq)
 	trace_plb();
 
 	raw_spin_unlock(&rq->__lock);
+#ifdef HCS_BALANCE
 	sched_hcs_balance_groups(top);
+#endif // HCS_BALANCE
 	moved = sched_balance_group_fixed(top, BIG_CORE_GROUP_MASK) + sched_balance_group_fixed(top, SMALL_CORE_GROUP_MASK);
 	raw_spin_lock(&rq->__lock);
 

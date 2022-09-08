@@ -99,6 +99,8 @@
 #include <linux/bpf.h>
 #include <linux/sched/mm.h>
 
+#include <linux/sched/hcs.h>
+
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -2607,6 +2609,8 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
 	return copy_process(NULL, 0, node, &args);
 }
 
+#ifdef HCS_BIAS
+
 /* L2 cache misses for Zen CPUs */
 static struct perf_event_attr pmc_event_cache_misses_attr = {
 	.type		= PERF_TYPE_HARDWARE,
@@ -2696,6 +2700,15 @@ static void pmc_setup_for_process(struct task_struct *p)
 		printk("Unable to create kernel counter: ITLB Misses\n");
 	}
 }
+
+#else
+
+static void pmc_setup_for_process(struct task_struct *p)
+{
+	;
+}
+
+#endif // HCS_BIAS
 
 
 /*
