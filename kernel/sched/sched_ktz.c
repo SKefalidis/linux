@@ -1044,7 +1044,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			tdq_high = TDQ(high_rq);
 			tdq_low = TDQ(low_rq);
 
-			p = tdq_choose(tdq_high, task_current(high_rq, p), true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
+			p = tdq_choose(tdq_high, high_rq->curr, true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
 			if (interact_score(p) > hcs_score_threshold) {
 				move_task_between_cores_of_different_groups(p, high_rq, low_rq, &BIG_CORE_GROUP_MASK);
 				moved_from_no_mans_land = true;
@@ -1078,7 +1078,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			tdq_high = TDQ(high_rq);
 			tdq_low = TDQ(low_rq);
 
-			p = tdq_choose(tdq_high, task_current(high_rq, p), true);
+			p = tdq_choose(tdq_high, high_rq->curr, true);
 			last_moved_hcs_score = hcs_score(p);
 			move_task_between_cores_of_different_groups(p, high_rq, low_rq, &BIG_CORE_GROUP_MASK);
 
@@ -1107,7 +1107,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			tdq_high = TDQ(high_rq);
 			tdq_low = TDQ(low_rq);
 
-			p = tdq_choose(tdq_high, task_current(high_rq, p), true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
+			p = tdq_choose(tdq_high, high_rq->curr, true); /* FIXME: possible race condition? we are selecting a process different than the current, but that might change if we don't lock the RQ */
 			if (interact_score(p) > hcs_score_threshold) {
 				move_task_between_cores_of_different_groups(p, high_rq, low_rq, &SMALL_CORE_GROUP_MASK);
 				moved_from_no_mans_land = true;
@@ -1138,7 +1138,7 @@ static int sched_hcs_balance_groups(struct sched_domain *sd)
 			tdq_high = TDQ(high_rq);
 			tdq_low = TDQ(low_rq);
 
-			p = tdq_choose(tdq_high, task_current(high_rq, p), true);
+			p = tdq_choose(tdq_high, high_rq->curr, true);
 			last_moved_hcs_score = hcs_score(p);
 			move_task_between_cores_of_different_groups(p, high_rq, low_rq, &SMALL_CORE_GROUP_MASK);
 
@@ -1562,7 +1562,6 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 
 	/* set core-group */
 	if (wake_flags & WF_TTWU) {
-		struct rq_flags rf;
 		int hscore = hcs_score(p);
 
 		LOG_HCS_DEBUG(p, "Select task rq WF_TTWU: %s\n", p->comm);
@@ -2002,7 +2001,7 @@ static inline void print_loads(void)
 		struct ktz_tdq *tdq = TDQ(rq);
 		if (smp_processor_id() != cpu)
 			raw_spin_lock_irqsave(&rq->__lock, flags);
-		LOG("\t| Cpu %d, load = %d, nr_running = %lu\n", cpu, tdq->load, rq->nr_running);
+		LOG("\t| Cpu %d, load = %d, nr_running = %u\n", cpu, tdq->load, rq->nr_running);
 		if (smp_processor_id() != cpu) {
 			raw_spin_unlock(&rq->__lock);
 			local_irq_restore(flags);
