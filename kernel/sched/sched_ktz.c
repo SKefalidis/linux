@@ -250,6 +250,8 @@ void init_ktz_tdq(struct ktz_tdq *ktz_tdq)
 	runq_init(&ktz_tdq->timeshare);
 	runq_init(&ktz_tdq->idle);
 
+	ktz_tdq->task_to_be_moved = NULL;
+
 	/* Print init message. */
 	printk_deferred("||| STABLE WITH ORIGINAL PLB + fixed random |||\n");
 	
@@ -900,15 +902,8 @@ static void move_task_between_cores_of_different_groups(struct task_struct *p, s
 
 	/* remove process from one core-group */
 	raw_spin_lock_irqsave(&high_rq->__lock, flags);
-	running = task_current(high_rq, p);
-	if (running) {
-		BUG(); /* unsupported by the ULE port */
-		put_prev_task(high_rq, p);
-	}
-	do_set_cpus_allowed(p, new_cpumask);
+	set_cpus_allowed_common(p, new_cpumask, 0);
 	detach_task(high_rq, p, low_rq->cpu);
-	if (running)
-		set_next_task(high_rq, p);
 	raw_spin_unlock(&high_rq->__lock);
 	local_irq_restore(flags);
 
@@ -917,23 +912,19 @@ static void move_task_between_cores_of_different_groups(struct task_struct *p, s
 	attach_task(low_rq, p);
 	raw_spin_unlock(&low_rq->__lock);
 	local_irq_restore(flags);
-	resched_curr(low_rq);
+
+	// resched_curr(low_rq);
 }
 
 static void move_task_to_core_group(struct task_struct *p, cpumask_t *new_cpumask)
 {
-	struct rq 		*old_rq;
 	struct rq 	 	*new_rq;
-	int				 old;
 	int				 new;
 
-	old = p->on_cpu;
 	new = sched_lowest(new_cpumask, -1, INT_MAX, -1);
-
-	old_rq = cpu_rq(old);
 	new_rq = cpu_rq(new);
 
-	move_task_between_cores_of_different_groups(p, old_rq, new_rq, new_cpumask);
+	move_task_between_cores_of_different_groups(p, task_rq(p), new_rq, new_cpumask);
 }
 
 static int sched_hcs_balance_groups(struct sched_domain *sd)
@@ -1344,7 +1335,23 @@ redo:
 #ifdef CONFIG_SMP
 		rq->idle_stamp = 0;
 #endif
-		next_task = tdq_choose(tdq, NULL, false);
+		if (tdq->task_to_be_moved) {
+			printk("########## %d %d\n", task_current(rq, tdq->task_to_be_moved), is_enqueued(tdq->task_to_be_moved));
+			
+			if (task_current(rq, tdq->task_to_be_moved) == false) {
+				// transfers kthreads, SHOULDN'T DO THAT!!!! hint: is_per_cpu_kthread()
+				printk("Move to correct core group %s\n", tdq->task_to_be_moved->comm);
+				raw_spin_unlock(&rq->__lock);
+				move_task_to_core_group (tdq->task_to_be_moved, tdq->task_to_be_moved->ktz_se.context_switch_cpus_mask);
+				raw_spin_lock(&rq->__lock);
+				tdq->task_to_be_moved = NULL;
+			}
+		}
+
+		next_task = tdq_choose(tdq, tdq->task_to_be_moved, false);
+
+		if (next_task == NULL)
+			return NULL;
 
 		update_ktz_rq_load_avg(rq_clock_pelt(rq), rq, 0);
 		cpufreq_update_util (rq, 0);
@@ -1411,17 +1418,6 @@ static void set_next_task_ktz(struct rq *rq, struct task_struct *p, bool first)
 	rq->ktz.curr = p;
 }
 
-static void context_switched_task_ktz(struct rq *rq, struct task_struct *old, struct task_struct *new)
-{
-	// LOG_HCS_DEBUG(old, "Context switched task: %s\n", old->comm);
-	
-	// /* switch core-group if required */
-	// if (cpumask_test_cpu(smp_processor_id(), &old->cpus_mask) == false) {
-	// 	LOG_HCS_DEBUG(old, "Context switched task cpu-group: current CPU %d\n", smp_processor_id());
-	// 	move_task_to_core_group (old, &old->cpus_mask);
-	// 	LOG_HCS_DEBUG(old, "Context switched task cpu-group: current CPU %d\n", smp_processor_id());
-	// }
-}
 
 #ifdef CONFIG_SMP
 static void check_balance(struct rq *rq)
@@ -1484,19 +1480,31 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	 * If the running process must change group mark it to be rescheduled.
 	 * When it is being rescheduled the scheduler will transfer it to the correct core-group.
 	 */
-	hscore = hcs_score(curr);
-	if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&curr->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
-		LOG_HCS_DEBUG(curr, "Task tick resched_curr to BIG_CORES (%d): %s\n", hscore, curr->comm);
-		LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-		// set_cpus_allowed_common(curr, &BIG_CORE_GROUP_MASK, 0);
-		resched_curr(rq); /* FIXME: does this really lead to a change of core-group? */
-		LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-	} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&curr->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
-		LOG_HCS_DEBUG(curr, "Task tick resched_curr to SMALL_CORES (%d): %s\n", hscore, curr->comm);
-		LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-		// set_cpus_allowed_common(curr, &SMALL_CORE_GROUP_MASK, 0);
-		resched_curr(rq);
-		LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+	if (num_online_cpus() == 8 && is_per_cpu_kthread(curr) == false) {
+		struct rq_flags rf;
+		hscore = hcs_score(curr);
+		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&curr->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
+			// LOG_HCS_DEBUG(curr, "Task tick resched_curr to BIG_CORES (%d): %s\n", hscore, curr->comm);
+			// LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+
+			curr->ktz_se.context_switch_cpus_mask = &BIG_CORE_GROUP_MASK;
+			rq->ktz.task_to_be_moved = curr;
+			resched_curr(rq); /* FIXME: does this really lead to a change of core-group? */
+
+			// LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&curr->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
+			// LOG_HCS_DEBUG(curr, "Task tick resched_curr to SMALL_CORES (%d): %s\n", hscore, curr->comm);
+			// LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+
+			curr->ktz_se.context_switch_cpus_mask = &SMALL_CORE_GROUP_MASK;
+			rq->ktz.task_to_be_moved = curr;
+			resched_curr(rq);
+
+			// LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+		} else {
+			// curr->ktz_se.context_switch_cpus_mask = NULL;
+			// rq->ktz.task_to_be_moved = NULL;
+		}
 	}
 }
 
@@ -1561,28 +1569,30 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 	}
 
 	/* set core-group */
-	if (wake_flags & WF_TTWU) {
-		int hscore = hcs_score(p);
+	if (is_per_cpu_kthread(p) == false) {
+		if (wake_flags & WF_TTWU) {
+			int hscore = hcs_score(p);
 
-		LOG_HCS_DEBUG(p, "Select task rq WF_TTWU: %s\n", p->comm);
+			LOG_HCS_DEBUG(p, "Select task rq WF_TTWU: %s\n", p->comm);
 
-		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&p->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
-			LOG_HCS_DEBUG(p, "Select task rq set BIG_CORES (%d): %s\n", hscore, p->comm);
-			LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+			if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&p->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
+				LOG_HCS_DEBUG(p, "Select task rq set BIG_CORES (%d): %s\n", hscore, p->comm);
+				LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+				do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
+				LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+			} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&p->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
+				LOG_HCS_DEBUG(p, "Select task rq set SMALL_CORES (%d): %s\n", hscore, p->comm);
+				LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+				do_set_cpus_allowed(p, &SMALL_CORE_GROUP_MASK);
+				LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+			}
+		} else if (wake_flags & WF_FORK) {
+			LOG_HCS_DEBUG(p, "Select task rq WF_FORK: %s\n", p->comm);
+			
 			do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
-			LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
-		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&p->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
-			LOG_HCS_DEBUG(p, "Select task rq set SMALL_CORES (%d): %s\n", hscore, p->comm);
-			LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
-			do_set_cpus_allowed(p, &SMALL_CORE_GROUP_MASK);
-			LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+			ktz_se->slptime = 0;
+			ktz_se->runtime = 0; /* TODO: deal with this in task_fork */
 		}
-	} else if (wake_flags & WF_FORK) {
-		LOG_HCS_DEBUG(p, "Select task rq WF_FORK: %s\n", p->comm);
-		
-		do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
-		ktz_se->slptime = 0;
-		ktz_se->runtime = 0; /* TODO: deal with this in task_fork */
 	}
 
 	/* 

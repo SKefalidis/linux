@@ -722,6 +722,8 @@ struct sched_ktz_entity {
 	int		state;
 	int		preempted; /* Is this task being preempted ? */
 
+	cpumask_t *context_switch_cpus_mask;
+
 	/* HCS */
 	struct perf_event *cache_misses_event;
 	u64 cache_misses;

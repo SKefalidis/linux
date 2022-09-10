@@ -784,6 +784,8 @@ struct ktz_tdq {
 
 	struct task_struct *curr;
 	struct sched_avg avg;
+
+	struct task_struct *task_to_be_moved;
 };
 
 #ifdef CONFIG_SMP
@@ -2154,8 +2156,6 @@ struct sched_class {
 
 	void (*put_prev_task)(struct rq *rq, struct task_struct *p);
 	void (*set_next_task)(struct rq *rq, struct task_struct *p, bool first);
-
-	void (*context_switched_task)(struct rq *rq, struct task_struct *old, struct task_struct *new);
 
 #ifdef CONFIG_SMP
 	int (*balance)(struct rq *rq, struct task_struct *prev, struct rq_flags *rf);
