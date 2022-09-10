@@ -6459,6 +6459,10 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
+
+		// if (prev->sched_class->context_switched_task) {
+		// 	prev->sched_class->context_switched_task(rq, prev, next);
+		// }
 	} else {
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 

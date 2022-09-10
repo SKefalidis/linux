@@ -113,13 +113,28 @@ DEFINE_PER_CPU(uint32_t, randomval);
 #define PRINT_DEBUG_INFO
 #ifdef PRINT_DEBUG_INFO
 #define LOG(...) 	printk_deferred(__VA_ARGS__)
+#define LOG_HCS_DEBUG(p, ...) \
+					if (strncmp (p->comm, "hcs_", 4) == 0) \
+						LOG (__VA_ARGS__)
 #else
-#define LOG(...) 	do {} while (0)
+#define LOG(...) 				do {} while (0)
+#define LOG_HCS_DEBUG(p, ...)  	do {} while (0)
 #endif // PRINT_DEBUG_INFO
 
 #define KTZ_SE(p)	(&(p)->ktz_se)
 #define TDQ(rq)		(&(rq)->ktz)
 #define RQ(tdq)		(container_of(tdq, struct rq, ktz))
+
+
+
+struct cpu_search {
+	struct cpumask *cs_mask;
+	int	cs_prefer;
+	int	cs_pri;		/* Min priority for low. */
+	int	cs_limit;	/* Max load for low, min load for high. */
+	int	cs_cpu;
+	int	cs_load;
+};
 
 
 
@@ -151,6 +166,9 @@ static inline struct task_struct*
                     ktz_task_of             (struct sched_ktz_entity *ktz_se);
 static inline bool  is_enqueued             (struct task_struct *p);
 
+static void 		move_task_between_cores_of_different_groups	(struct task_struct *p, struct rq *high_rq, struct rq *low_rq, cpumask_t *new_cpumask);
+static void 		move_task_to_core_group						(struct task_struct *p, cpumask_t *new_cpumask);
+
 /* Scheduler interface functions */
 static void 		enqueue_task_ktz		(struct rq *rq, struct task_struct *p, int flags);
 static void 		dequeue_task_ktz		(struct rq *rq, struct task_struct *p, int flags);
@@ -159,6 +177,8 @@ static struct task_struct*
 					pick_next_task_ktz		(struct rq *rq);
 static void 		put_prev_task_ktz		(struct rq *rq, struct task_struct *prev);
 static void 		set_next_task_ktz		(struct rq *rq, struct task_struct *p, bool first);
+static void 		context_switched_task_ktz
+											(struct rq *rq, struct task_struct *old, struct task_struct *new);
 static void 		task_tick_ktz			(struct rq *rq, struct task_struct *curr, int queued);
 static void 		task_fork_ktz			(struct task_struct *p);
 static void 		task_dead_ktz			(struct task_struct *p);
@@ -1234,10 +1254,13 @@ static void enqueue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(p);
 
+	LOG_HCS_DEBUG(p, "Enqueue: %s\n", p->comm);
+
 	add_nr_running(rq,1);
 	if (p->ktz_prio == 0)
 		p->ktz_prio = p->prio;
 	if (flags & ENQUEUE_WAKEUP) {
+		LOG_HCS_DEBUG(p, "Enqueue wakeup: %s\n", p->comm);
 		/* Count sleeping ticks. */
 		ktz_se->slptime += (jiffies - ktz_se->slptick) << SCHED_TICK_SHIFT;
 		ktz_se->slptick = 0;
@@ -1258,6 +1281,8 @@ static void dequeue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(p);
+
+	LOG_HCS_DEBUG(p, "Dequeue: %s\n", p->comm);
 
 	BUG_ON(!ktz_se->curr_runq);
 	sub_nr_running(rq,1);
@@ -1365,6 +1390,8 @@ static void put_prev_task_ktz(struct rq *rq, struct task_struct *prev)
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(prev);
 
+	LOG_HCS_DEBUG(prev, "Put prev task: %s\n", prev->comm);
+
 	if (is_enqueued(prev)) {
 		tdq_runq_rem(tdq, prev);
 		tdq_runq_add(tdq, prev, ktz_se->preempted ? SRQ_PREEMPTED : 0);
@@ -1384,6 +1411,18 @@ static void set_next_task_ktz(struct rq *rq, struct task_struct *p, bool first)
 	rq->ktz.curr = p;
 }
 
+static void context_switched_task_ktz(struct rq *rq, struct task_struct *old, struct task_struct *new)
+{
+	// LOG_HCS_DEBUG(old, "Context switched task: %s\n", old->comm);
+	
+	// /* switch core-group if required */
+	// if (cpumask_test_cpu(smp_processor_id(), &old->cpus_mask) == false) {
+	// 	LOG_HCS_DEBUG(old, "Context switched task cpu-group: current CPU %d\n", smp_processor_id());
+	// 	move_task_to_core_group (old, &old->cpus_mask);
+	// 	LOG_HCS_DEBUG(old, "Context switched task cpu-group: current CPU %d\n", smp_processor_id());
+	// }
+}
+
 #ifdef CONFIG_SMP
 static void check_balance(struct rq *rq)
 {
@@ -1399,6 +1438,8 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(curr);
 	int hscore;
+
+	LOG_HCS_DEBUG(curr, "Task tick: %s\n", curr->comm);
 
 	tdq->oldswitchcnt = tdq->switchcnt;
 	tdq->switchcnt = tdq->load;
@@ -1444,10 +1485,18 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	 * When it is being rescheduled the scheduler will transfer it to the correct core-group.
 	 */
 	hscore = hcs_score(curr);
-	if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+	if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&curr->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
+		LOG_HCS_DEBUG(curr, "Task tick resched_curr to BIG_CORES (%d): %s\n", hscore, curr->comm);
+		LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+		// set_cpus_allowed_common(curr, &BIG_CORE_GROUP_MASK, 0);
 		resched_curr(rq); /* FIXME: does this really lead to a change of core-group? */
-	} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_bits(&curr->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
+		LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+	} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&curr->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
+		LOG_HCS_DEBUG(curr, "Task tick resched_curr to SMALL_CORES (%d): %s\n", hscore, curr->comm);
+		LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
+		// set_cpus_allowed_common(curr, &SMALL_CORE_GROUP_MASK, 0);
 		resched_curr(rq);
+		LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
 	}
 }
 
@@ -1497,6 +1546,8 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 
 	ktz_se = KTZ_SE(p);
 
+	LOG_HCS_DEBUG(p, "Select task rq: %s\n", p->comm);
+
 	/* 
 	 * HCS: Interactivity based core-group assignment.
 	 */
@@ -1513,12 +1564,23 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 	if (wake_flags & WF_TTWU) {
 		struct rq_flags rf;
 		int hscore = hcs_score(p);
-		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_bits(&p->cpus_mask) != cpumask_bits(&BIG_CORE_GROUP_MASK)) {
+
+		LOG_HCS_DEBUG(p, "Select task rq WF_TTWU: %s\n", p->comm);
+
+		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&p->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
+			LOG_HCS_DEBUG(p, "Select task rq set BIG_CORES (%d): %s\n", hscore, p->comm);
+			LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
 			do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
-		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_bits(&p->cpus_mask) != cpumask_bits(&SMALL_CORE_GROUP_MASK)) {
+			LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
+		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&p->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
+			LOG_HCS_DEBUG(p, "Select task rq set SMALL_CORES (%d): %s\n", hscore, p->comm);
+			LOG_HCS_DEBUG(p, "Before: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
 			do_set_cpus_allowed(p, &SMALL_CORE_GROUP_MASK);
+			LOG_HCS_DEBUG(p, "After: %*pb[l]", cpumask_pr_args(&p->cpus_mask));
 		}
 	} else if (wake_flags & WF_FORK) {
+		LOG_HCS_DEBUG(p, "Select task rq WF_FORK: %s\n", p->comm);
+		
 		do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
 		ktz_se->slptime = 0;
 		ktz_se->runtime = 0; /* TODO: deal with this in task_fork */
@@ -1667,15 +1729,6 @@ static inline bool is_enqueued(struct task_struct *p)
 #ifdef CONFIG_SMP
 #define	CPU_SEARCH_LOWEST	0x1
 #define	CPU_SEARCH_HIGHEST	0x2
-
-struct cpu_search {
-	struct cpumask *cs_mask;
-	int	cs_prefer;
-	int	cs_pri;		/* Min priority for low. */
-	int	cs_limit;	/* Max load for low, min load for high. */
-	int	cs_cpu;
-	int	cs_load;
-};
 
 static struct sched_domain *get_top_domain(int cpu)
 {
