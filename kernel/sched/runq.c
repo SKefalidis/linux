@@ -29,6 +29,7 @@ void runq_add_pri(struct runq * q, struct task_struct *p, int pri, int flags)
 {
 	struct list_head *head;
 	struct sched_ktz_entity *ke = &p->ktz_se;
+	// printk("ADD TO RUNQ: %s", p->comm);
 	ke->curr_runq = q;
 
 	pri = pri % KTZ_HEADS_PER_RUNQ;

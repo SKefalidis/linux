@@ -654,6 +654,10 @@ static void sched_interact_fork(struct task_struct *td)
 		ts->runtime /= ratio;
 		ts->slptime /= ratio;
 	}
+	
+	while (hcs_score(td) < hcs_score_threshold) {
+		ts->runtime += TICKINCR;
+	}
 }
 
 /*
@@ -1283,6 +1287,8 @@ static void dequeue_task_ktz(struct rq *rq, struct task_struct *p, int flags)
 	//list_del_init(&ktz_se->run_list);
 	BUG_ON(!ktz_se->curr_runq);
 	tdq_runq_rem(tdq, p);
+	// printk("REMOVE FROM RUNQ: %s", p->comm);
+	// dump_stack();
 	ktz_se->curr_runq = NULL;
 	tdq_load_rem(tdq, p);
 	if (p->ktz_prio == tdq->lowpri)
@@ -1335,17 +1341,19 @@ redo:
 #ifdef CONFIG_SMP
 		rq->idle_stamp = 0;
 #endif
-		if (tdq->task_to_be_moved) {
+		if (tdq->task_to_be_moved && task_rq(tdq->task_to_be_moved) == rq) {
 			printk("########## %d %d\n", task_current(rq, tdq->task_to_be_moved), is_enqueued(tdq->task_to_be_moved));
 			
 			if (task_current(rq, tdq->task_to_be_moved) == false) {
 				// transfers kthreads, SHOULDN'T DO THAT!!!! hint: is_per_cpu_kthread()
-				printk("Move to correct core group %s\n", tdq->task_to_be_moved->comm);
+				printk("Move to correct core group %s %s\n", tdq->task_to_be_moved->comm, cpumask_equal(tdq->task_to_be_moved->ktz_se.context_switch_cpus_mask, &BIG_CORE_GROUP_MASK) ? "BIG" : "SMALL");
 				raw_spin_unlock(&rq->__lock);
 				move_task_to_core_group (tdq->task_to_be_moved, tdq->task_to_be_moved->ktz_se.context_switch_cpus_mask);
 				raw_spin_lock(&rq->__lock);
 				tdq->task_to_be_moved = NULL;
 			}
+		} else {
+			tdq->task_to_be_moved = NULL;
 		}
 
 		next_task = tdq_choose(tdq, tdq->task_to_be_moved, false);
@@ -1397,7 +1405,7 @@ static void put_prev_task_ktz(struct rq *rq, struct task_struct *prev)
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(prev);
 
-	LOG_HCS_DEBUG(prev, "Put prev task: %s\n", prev->comm);
+	LOG_HCS_DEBUG(prev, "Put prev task: %s (%d, sleeptime: %d, runtime: %d)\n", prev->comm, hcs_score(prev), prev->ktz_se.slptime, prev->ktz_se.runtime);
 
 	if (is_enqueued(prev)) {
 		tdq_runq_rem(tdq, prev);
@@ -1422,7 +1430,6 @@ static void set_next_task_ktz(struct rq *rq, struct task_struct *p, bool first)
 #ifdef CONFIG_SMP
 static void check_balance(struct rq *rq)
 {
-	printk("Check balance %d %d\n", PERIODIC_BALANCE, balance_ticks);
 	if (PERIODIC_BALANCE && balance_ticks && --balance_ticks == 0) {
 		sched_balance(rq);
 	}
@@ -1435,7 +1442,7 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 	struct sched_ktz_entity *ktz_se = KTZ_SE(curr);
 	int hscore;
 
-	LOG_HCS_DEBUG(curr, "Task tick: %s\n", curr->comm);
+	// LOG_HCS_DEBUG(curr, "Task tick: %s\n", curr->comm);
 
 	tdq->oldswitchcnt = tdq->switchcnt;
 	tdq->switchcnt = tdq->load;
@@ -1484,27 +1491,20 @@ static void task_tick_ktz(struct rq *rq, struct task_struct *curr, int queued)
 		struct rq_flags rf;
 		hscore = hcs_score(curr);
 		if (hscore > hcs_score_threshold + hsc_score_deviation && cpumask_equal(&curr->cpus_mask, &BIG_CORE_GROUP_MASK) == false) {
-			// LOG_HCS_DEBUG(curr, "Task tick resched_curr to BIG_CORES (%d): %s\n", hscore, curr->comm);
-			// LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-
+			LOG_HCS_DEBUG(curr, "Task tick resched_curr to BIG_CORES (%d): %s\n", hscore, curr->comm);
 			curr->ktz_se.context_switch_cpus_mask = &BIG_CORE_GROUP_MASK;
 			rq->ktz.task_to_be_moved = curr;
-			resched_curr(rq); /* FIXME: does this really lead to a change of core-group? */
-
-			// LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-		} else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&curr->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
-			// LOG_HCS_DEBUG(curr, "Task tick resched_curr to SMALL_CORES (%d): %s\n", hscore, curr->comm);
-			// LOG_HCS_DEBUG(curr, "Before: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-
-			curr->ktz_se.context_switch_cpus_mask = &SMALL_CORE_GROUP_MASK;
-			rq->ktz.task_to_be_moved = curr;
 			resched_curr(rq);
-
-			// LOG_HCS_DEBUG(curr, "After: %*pb[l]", cpumask_pr_args(&curr->cpus_mask));
-		} else {
-			// curr->ktz_se.context_switch_cpus_mask = NULL;
-			// rq->ktz.task_to_be_moved = NULL;
-		}
+		} 
+		// else if (hscore < hcs_score_threshold - hsc_score_deviation  && cpumask_equal(&curr->cpus_mask, &SMALL_CORE_GROUP_MASK) == false) {
+		// 	LOG_HCS_DEBUG(curr, "Task tick resched_curr to SMALL_CORES (%d): %s\n", hscore, curr->comm);
+		// 	curr->ktz_se.context_switch_cpus_mask = &SMALL_CORE_GROUP_MASK;
+		// 	rq->ktz.task_to_be_moved = curr;
+		// 	resched_curr(rq);
+		// } else {
+		// 	// curr->ktz_se.context_switch_cpus_mask = NULL;
+		// 	// rq->ktz.task_to_be_moved = NULL;
+		// }
 	}
 }
 
@@ -1590,8 +1590,6 @@ static int select_task_rq_ktz(struct task_struct *p, int cpu, int wake_flags)
 			LOG_HCS_DEBUG(p, "Select task rq WF_FORK: %s\n", p->comm);
 			
 			do_set_cpus_allowed(p, &BIG_CORE_GROUP_MASK);
-			ktz_se->slptime = 0;
-			ktz_se->runtime = 0; /* TODO: deal with this in task_fork */
 		}
 	}
 
