@@ -113,6 +113,7 @@ DEFINE_PER_CPU(uint32_t, randomval);
 #define PRINT_DEBUG_INFO
 #ifdef PRINT_DEBUG_INFO
 #define LOG(...) 	printk_deferred(__VA_ARGS__)
+// #define LOG(...) 	printk(__VA_ARGS__)
 #define LOG_HCS_DEBUG(p, ...) \
 					if (strncmp (p->comm, "hcs_", 4) == 0) \
 						LOG (__VA_ARGS__)
@@ -177,8 +178,6 @@ static struct task_struct*
 					pick_next_task_ktz		(struct rq *rq);
 static void 		put_prev_task_ktz		(struct rq *rq, struct task_struct *prev);
 static void 		set_next_task_ktz		(struct rq *rq, struct task_struct *p, bool first);
-static void 		context_switched_task_ktz
-											(struct rq *rq, struct task_struct *old, struct task_struct *new);
 static void 		task_tick_ktz			(struct rq *rq, struct task_struct *curr, int queued);
 static void 		task_fork_ktz			(struct task_struct *p);
 static void 		task_dead_ktz			(struct task_struct *p);
@@ -385,12 +384,38 @@ static int interact_score(struct task_struct *p)
 	return (0);
 }
 
+#ifdef HCS_BIAS
+static int bias_score(struct task_struct *p)
+{
+	struct sched_ktz_entity *se = &p->ktz_se;
+	int bscore = 0;
+
+	raw_spin_lock(&se->perf_stats_lock);
+
+	/* TODO: instead of this simple, linear formula, use a formula that scales so as misses grow they are less important
+	 * e.g. 400 caches misses -> 4 
+	 		4000 caches misses -> 20 (instead of 40)
+	 */
+	bscore += se->cache_misses_avg / 400;
+	bscore += se->dtlb_misses_avg / 40;
+	bscore += se->itlb_misses_avg / 15;
+
+	raw_spin_unlock(&se->perf_stats_lock);
+	
+	return bscore;
+}
+#endif // HCS_BIAS
+
 static int hcs_score(struct task_struct *p)
 {
-	// use bias only if we are on the big cores to maybe move to the small cores
+	int hscore = interact_score(p);
+#ifdef HCS_BIAS
+	// use bias only if we are on the big cores to maybe move to the small cores (so, only to subtract from the interactivity score)
 	// it doesn't make sense to move a task from a small core to a big core because it uses the CPU effectively, since it doesn't use it enough to warrant moving to the big core anyway
+	// hscore -= bias_score(p);
+#endif // HCS_BIAS
 
-	return interact_score(p);
+	return hscore;
 }
 
 /*
@@ -1341,7 +1366,7 @@ redo:
 #ifdef CONFIG_SMP
 		rq->idle_stamp = 0;
 #endif
-		if (tdq->task_to_be_moved && task_rq(tdq->task_to_be_moved) == rq) {
+		if (tdq->task_to_be_moved && task_rq(tdq->task_to_be_moved) == rq && is_enqueued(tdq->task_to_be_moved)) {
 			printk("########## %d %d\n", task_current(rq, tdq->task_to_be_moved), is_enqueued(tdq->task_to_be_moved));
 			
 			if (task_current(rq, tdq->task_to_be_moved) == false) {
@@ -1405,7 +1430,8 @@ static void put_prev_task_ktz(struct rq *rq, struct task_struct *prev)
 	struct ktz_tdq *tdq = TDQ(rq);
 	struct sched_ktz_entity *ktz_se = KTZ_SE(prev);
 
-	LOG_HCS_DEBUG(prev, "Put prev task: %s (%d, sleeptime: %d, runtime: %d)\n", prev->comm, hcs_score(prev), prev->ktz_se.slptime, prev->ktz_se.runtime);
+	LOG_HCS_DEBUG(prev, "Put prev task: %s (HCS %d, sleeptime: %llu, runtime: %llu)\n", prev->comm, hcs_score(prev), prev->ktz_se.slptime, prev->ktz_se.runtime);
+	LOG_HCS_DEBUG(prev, "\t\t(BIAS %d, cache_misses: %llu, dtlb_misses: %llu, itlb_misses: %llu)\n", bias_score(prev), prev->ktz_se.cache_misses_avg, prev->ktz_se.dtlb_misses_avg, prev->ktz_se.itlb_misses_avg);
 
 	if (is_enqueued(prev)) {
 		tdq_runq_rem(tdq, prev);
@@ -1538,6 +1564,8 @@ static void task_dead_ktz(struct task_struct *p)
 	pktz_se->runtime += cktz_se->runtime;
 	interact_update(parent);
 	compute_priority(parent);
+
+	printk("Task dead %s\n\tcache: %llu, dtlb: %llu, itlb: %llu", p->comm, p->ktz_se.cache_misses, p->ktz_se.dtlb_misses, p->ktz_se.itlb_misses);
 }
 
 #ifdef CONFIG_SMP

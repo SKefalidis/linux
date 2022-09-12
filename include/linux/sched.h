@@ -725,12 +725,22 @@ struct sched_ktz_entity {
 	cpumask_t *context_switch_cpus_mask;
 
 	/* HCS */
-	struct perf_event *cache_misses_event;
-	u64 cache_misses;
-	struct perf_event *itlb_misses_event;
-	u64 itlb_misses;
-	struct perf_event *dtlb_misses_event;
-	u64 dtlb_misses;
+	raw_spinlock_t 		perf_stats_lock; /* TODO: Should probably be a spinlock_t */
+
+	struct perf_event  *cache_misses_event;
+	u64 				cache_misses_prev;
+	u64 				cache_misses;
+	u64					cache_misses_avg;
+
+	struct perf_event  *itlb_misses_event;
+	u64 				itlb_misses_prev;
+	u64 				itlb_misses;
+	u64					itlb_misses_avg;
+
+	struct perf_event  *dtlb_misses_event;
+	u64 				dtlb_misses_prev;
+	u64 				dtlb_misses;
+	u64 				dtlb_misses_avg;
 };
 
 union rcu_special {
