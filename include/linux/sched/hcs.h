@@ -1,0 +1,3 @@
+#define HCS_BIAS
+// #define HCS_BALANCE
+// #define HCS_LOTTERY_SCHEDULING

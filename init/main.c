@@ -716,7 +716,6 @@ noinline void __ref rest_init(void)
 	system_state = SYSTEM_SCHEDULING;
 
 	complete(&kthreadd_done);
-
 	/*
 	 * The boot idle thread must execute schedule()
 	 * at least once to get things moving:

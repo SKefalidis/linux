@@ -99,6 +99,8 @@
 #include <linux/bpf.h>
 #include <linux/sched/mm.h>
 
+#include <linux/sched/hcs.h>
+
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1048,6 +1050,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #ifdef CONFIG_CPU_SUP_INTEL
 	tsk->reported_split_lock = 0;
 #endif
+
+	tsk->ktz_se.cache_misses_event = NULL;
+	tsk->ktz_se.dtlb_misses_event = NULL;
+	tsk->ktz_se.itlb_misses_event = NULL;
 
 	return tsk;
 
@@ -2603,6 +2609,144 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
 	return copy_process(NULL, 0, node, &args);
 }
 
+#ifdef HCS_BIAS
+
+/* L2 cache misses for Zen CPUs */
+static struct perf_event_attr pmc_event_cache_misses_attr = {
+	.type		= PERF_TYPE_HARDWARE,
+	.config		= PERF_COUNT_HW_CACHE_MISSES,
+	.size		= sizeof(struct perf_event_attr),
+	.exclude_host = 1,
+	.exclude_kernel = 1,
+	.sample_period = 100,
+	.freq = 1,
+	.sample_freq = 49,
+};
+
+/* TLB misses */
+static struct perf_event_attr pmc_event_dtlb_attr = {
+	.type		= PERF_TYPE_HW_CACHE,
+	.config		= 
+				PERF_COUNT_HW_CACHE_DTLB |
+				(PERF_COUNT_HW_CACHE_OP_READ << 8) |
+				(PERF_COUNT_HW_CACHE_RESULT_MISS << 16),
+	.size		= sizeof(struct perf_event_attr),
+	.exclude_host = 1,
+	.exclude_kernel = 1,
+	.sample_period = 100,
+	.freq = 1,
+	.sample_freq = 49,
+};
+
+static struct perf_event_attr pmc_event_itlb_attr = {
+	.type		= PERF_TYPE_HW_CACHE,
+	.config		= 
+				PERF_COUNT_HW_CACHE_ITLB |
+				(PERF_COUNT_HW_CACHE_OP_READ << 8) |
+				(PERF_COUNT_HW_CACHE_RESULT_MISS << 16),
+	.size		= sizeof(struct perf_event_attr),
+	.exclude_host = 1,
+	.exclude_kernel = 1,
+	.sample_period = 100,
+	.freq = 1,
+	.sample_freq = 49,
+};
+
+/* Callback function for perf event subsystem */
+static void perf_callback(struct perf_event *event,
+				       struct perf_sample_data *data,
+				       struct pt_regs *regs)
+{
+	struct task_struct 		*p 	= event->ctx->task;
+	struct sched_ktz_entity *se = &p->ktz_se;
+	u64 LATEST_WEIGHT = 50;
+	u64 HISTORY_WEIGHT = 1000 - LATEST_WEIGHT;
+
+	raw_spin_lock(&p->ktz_se.perf_stats_lock);
+
+	if (p->ktz_se.cache_misses_event) {
+		u64 cache_misses_diff = 0;
+		perf_event_read_local(p->ktz_se.cache_misses_event, &p->ktz_se.cache_misses, NULL, NULL);
+		cache_misses_diff = se->cache_misses - se->cache_misses_prev;
+		if (cache_misses_diff > 0) {
+			se->cache_misses_prev = se->cache_misses;
+			se->cache_misses_avg = (cache_misses_diff * LATEST_WEIGHT + se->cache_misses_avg * HISTORY_WEIGHT) / 1000;
+		}
+	}
+	
+	if (p->ktz_se.dtlb_misses_event) {
+		u64 dtlb_misses_diff = 0;
+		perf_event_read_local(p->ktz_se.dtlb_misses_event, &p->ktz_se.dtlb_misses, NULL, NULL);
+		dtlb_misses_diff = se->dtlb_misses - se->dtlb_misses_prev;
+		if (dtlb_misses_diff > 0) {
+			se->dtlb_misses_prev = se->dtlb_misses;
+			se->dtlb_misses_avg = (dtlb_misses_diff * LATEST_WEIGHT + se->dtlb_misses_avg * HISTORY_WEIGHT) / 1000;
+		}
+	}
+
+	if (p->ktz_se.itlb_misses_event) {
+		u64 itlb_misses_diff = 0;
+		perf_event_read_local(p->ktz_se.itlb_misses_event, &p->ktz_se.itlb_misses, NULL, NULL);
+		itlb_misses_diff = se->itlb_misses - se->itlb_misses_prev;
+		if (itlb_misses_diff > 0) {
+			se->itlb_misses_prev = se->itlb_misses;
+			se->itlb_misses_avg = (itlb_misses_diff * LATEST_WEIGHT + se->itlb_misses_avg * HISTORY_WEIGHT) / 1000;
+		}
+	}
+
+	raw_spin_unlock(&p->ktz_se.perf_stats_lock);
+}
+
+static void pmc_setup_for_process(struct task_struct *p)
+{
+	struct perf_event *event;
+
+	raw_spin_lock_init(&p->ktz_se.perf_stats_lock);
+
+	event = perf_event_create_kernel_counter(&pmc_event_cache_misses_attr, -1, p, perf_callback, NULL);
+	if (!IS_ERR(event)) {
+		p->ktz_se.cache_misses_event = event;
+	} else {
+		p->ktz_se.cache_misses_event = NULL;
+		printk("Unable to create kernel counter: Cache Misses\n");
+	}
+	p->ktz_se.cache_misses = 0;
+	p->ktz_se.cache_misses_prev = 0;
+	p->ktz_se.cache_misses_avg = 0;
+
+	event = perf_event_create_kernel_counter(&pmc_event_dtlb_attr, -1, p, perf_callback, NULL);
+	if (!IS_ERR(event)) {
+		p->ktz_se.dtlb_misses_event = event;
+	} else {
+		p->ktz_se.dtlb_misses_event = NULL;
+		printk("Unable to create kernel counter: DTLB Misses\n");
+	}
+	p->ktz_se.dtlb_misses = 0;
+	p->ktz_se.dtlb_misses_prev = 0;
+	p->ktz_se.dtlb_misses_avg = 0;
+
+	event = perf_event_create_kernel_counter(&pmc_event_itlb_attr, -1, p, perf_callback, NULL);
+	if (!IS_ERR(event)) {
+		p->ktz_se.itlb_misses_event = event;
+	} else {
+		p->ktz_se.itlb_misses_event = NULL;
+		printk("Unable to create kernel counter: ITLB Misses\n");
+	}
+	p->ktz_se.itlb_misses = 0;
+	p->ktz_se.itlb_misses_prev = 0;
+	p->ktz_se.itlb_misses_avg = 0;
+}
+
+#else
+
+static void pmc_setup_for_process(struct task_struct *p)
+{
+	;
+}
+
+#endif // HCS_BIAS
+
+
 /*
  *  Ok, this is the main fork-routine.
  *
@@ -2688,6 +2832,10 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	}
 
 	put_pid(pid);
+
+	/* setup perf event monitoring now that interrupts are enabled */
+	pmc_setup_for_process(p);
+
 	return nr;
 }
 

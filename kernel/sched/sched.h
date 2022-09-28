@@ -87,6 +87,9 @@
 # include <asm/paravirt_api_clock.h>
 #endif
 
+#include <linux/slab.h>
+#include <linux/sched/runq.h>
+
 #include "cpupri.h"
 #include "cpudeadline.h"
 
@@ -756,6 +759,35 @@ static inline long se_runnable(struct sched_entity *se)
 }
 #endif
 
+struct ktz_tdq {
+	/* legacy */
+	struct list_head queue;
+	//struct mtx_padalign lock;		/* run queue lock. */
+	//struct cpu_group *cg;		/* Pointer to cpu topology. */
+	volatile int	load;		/* Aggregate load. */
+	volatile int	cpu_idle;		/* cpu_idle() is active. */
+	int		sysload;		/* For loadavg, !ITHD load. */
+	int		transferable;	/* Transferable thread count. */
+	short		switchcnt;		/* Switches this tick. */
+	short		oldswitchcnt;	/* Switches last tick. */
+	u_char		lowpri;		/* Lowest priority thread. */
+	u_char		ipipending;		/* IPI pending. */
+	int		idx;		/* Current insert index. */
+	int		ridx;		/* Current removal index. */
+	struct runq	realtime;		/* real-time run queue. */
+	struct runq	timeshare;		/* timeshare run queue. */
+	struct runq	idle;		/* Queue of IDLE threads. */
+	//char		name[TDQ_NAME_LEN];
+#ifdef KTR
+	//char		loadname[TDQ_LOADNAME_LEN];
+#endif
+
+	struct task_struct *curr;
+	struct sched_avg avg;
+
+	struct task_struct *task_to_be_moved;
+};
+
 #ifdef CONFIG_SMP
 /*
  * XXX we want to get rid of these helpers and use the full load resolution.
@@ -954,6 +986,7 @@ struct rq {
 	struct cfs_rq		cfs;
 	struct rt_rq		rt;
 	struct dl_rq		dl;
+	struct ktz_tdq 		ktz;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this CPU: */
@@ -2213,6 +2246,7 @@ extern struct sched_class __sched_class_lowest[];
 extern const struct sched_class stop_sched_class;
 extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
+extern const struct sched_class ktz_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
 
@@ -2720,6 +2754,7 @@ static inline void resched_latency_warn(int cpu, u64 latency) {}
 extern void init_cfs_rq(struct cfs_rq *cfs_rq);
 extern void init_rt_rq(struct rt_rq *rt_rq);
 extern void init_dl_rq(struct dl_rq *dl_rq);
+extern void init_ktz_tdq(struct ktz_tdq *ktz_tdq);
 
 extern void cfs_bandwidth_usage_inc(void);
 extern void cfs_bandwidth_usage_dec(void);
@@ -2897,6 +2932,7 @@ static inline unsigned long cpu_util_dl(struct rq *rq)
  *
  * Return: (Estimated) utilization for the specified CPU.
  */
+/* TODO: Disable UTIL_EST for a fair comparison */
 static inline unsigned long cpu_util_cfs(int cpu)
 {
 	struct cfs_rq *cfs_rq;
@@ -2911,6 +2947,29 @@ static inline unsigned long cpu_util_cfs(int cpu)
 	}
 
 	return min(util, capacity_orig_of(cpu));
+}
+
+/* TODO: Implement UTIL_EST as defined in the comments of cpu_util_cfs */
+static inline unsigned long cpu_util_ktz(int cpu)
+{
+	struct ktz_tdq *ktz_tdq;
+	unsigned long util;
+
+	ktz_tdq = &cpu_rq(cpu)->ktz;
+	util = READ_ONCE(ktz_tdq->avg.util_avg);
+
+	return min(util, capacity_orig_of(cpu));
+}
+
+static inline unsigned int cpu_util_ktz_percentage(int cpu)
+{
+	struct ktz_tdq *ktz_tdq;
+	unsigned long util;
+
+	ktz_tdq = &cpu_rq(cpu)->ktz;
+	util = READ_ONCE(ktz_tdq->avg.util_avg);
+
+	return (min(util, capacity_orig_of(cpu)) / capacity_orig_of(cpu)) * 100;
 }
 
 static inline unsigned long cpu_util_rt(struct rq *rq)
@@ -2984,7 +3043,7 @@ static inline bool uclamp_rq_is_capped(struct rq *rq)
 	if (!static_branch_likely(&sched_uclamp_used))
 		return false;
 
-	rq_util = cpu_util_cfs(cpu_of(rq)) + cpu_util_rt(rq);
+	rq_util = cpu_util_ktz(cpu_of(rq)) + cpu_util_rt(rq);
 	max_util = READ_ONCE(rq->uclamp[UCLAMP_MAX].value);
 
 	return max_util != SCHED_CAPACITY_SCALE && rq_util >= max_util;
